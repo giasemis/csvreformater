@@ -23,13 +23,22 @@ const PRODUCT_TYPES = [
     ],
 ];
 
-const OUTPUT_HEADERS = [
-    'id', 'active', 'title', 'level', 'pricenotax', 'taxrule', 'wholesale', 'onsale',
-    '', 'discount%', '', '', 'isbn', '', '', 'ekdotis', '', '', '', '', '', '', '',
-    'weight', '', '', 'quantity', '', '', '', '', '', '', '', 'ekdotis', 'description',
-    'tags', 'meta-title', 'meta-keywords', 'metadescription', 'url-rewritten',
-    'text when in stock', '', 'available for order', 'available date', 'creation date',
-    'showprice', 'img urls', '', '', 'etos ekdosis', '', 'condition', '', '', '', '', '', '', '', ''
+const PRESTASHOP_VERSIONS = [
+    '1.7' => [
+        'label' => 'PrestaShop 1.7',
+        'template' => 'products_import-presta17.csv',
+        'fields' => ['id'=>0, 'active'=>1, 'title'=>2, 'category'=>3, 'price'=>4, 'tax'=>5, 'wholesale'=>6, 'onsale'=>7, 'discount'=>9, 'reference'=>12, 'publisher'=>15, 'ean'=>16, 'weight'=>22, 'quantity'=>25, 'summary'=>33, 'description'=>34, 'tags'=>35, 'meta_title'=>36, 'meta_keywords'=>37, 'meta_description'=>38, 'slug'=>39, 'in_stock'=>40, 'available'=>42, 'available_date'=>43, 'creation_date'=>44, 'show_price'=>45, 'images'=>46, 'feature'=>49, 'condition'=>51],
+    ],
+    '8' => [
+        'label' => 'PrestaShop 8',
+        'template' => 'products_import-presta8.csv',
+        'fields' => ['id'=>0, 'active'=>1, 'title'=>2, 'category'=>3, 'price'=>4, 'tax'=>5, 'wholesale'=>6, 'onsale'=>7, 'discount'=>9, 'reference'=>12, 'publisher'=>15, 'ean'=>16, 'weight'=>22, 'quantity'=>25, 'summary'=>33, 'description'=>34, 'tags'=>35, 'meta_title'=>36, 'meta_keywords'=>37, 'meta_description'=>38, 'slug'=>39, 'in_stock'=>40, 'available'=>42, 'available_date'=>43, 'creation_date'=>44, 'show_price'=>45, 'images'=>46, 'feature'=>49, 'condition'=>51],
+    ],
+    '9' => [
+        'label' => 'PrestaShop 9',
+        'template' => 'products_import-presta9.csv',
+        'fields' => ['id'=>0, 'active'=>1, 'title'=>2, 'category'=>3, 'price'=>4, 'tax'=>5, 'wholesale'=>6, 'onsale'=>7, 'discount'=>9, 'reference'=>12, 'publisher'=>15, 'ean'=>16, 'weight'=>24, 'quantity'=>27, 'summary'=>36, 'description'=>37, 'tags'=>38, 'meta_title'=>39, 'meta_description'=>40, 'slug'=>41, 'in_stock'=>42, 'available'=>44, 'available_date'=>45, 'creation_date'=>46, 'show_price'=>47, 'images'=>48, 'feature'=>51, 'condition'=>53],
+    ],
 ];
 
 const PUBLISHERS = [
@@ -75,7 +84,9 @@ function lowerText(string $value): string
 
 function textLength(string $value): int
 {
-    return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+    if (function_exists('mb_strlen')) return mb_strlen($value, 'UTF-8');
+    $characters = preg_split('//u', $value, -1, PREG_SPLIT_NO_EMPTY);
+    return is_array($characters) ? count($characters) : strlen($value);
 }
 
 function textSlice(string $value, int $start, ?int $length = null): string
@@ -83,7 +94,73 @@ function textSlice(string $value, int $start, ?int $length = null): string
     if (function_exists('mb_substr')) {
         return mb_substr($value, $start, $length, 'UTF-8');
     }
-    return $length === null ? substr($value, $start) : substr($value, $start, $length);
+    $characters = preg_split('//u', $value, -1, PREG_SPLIT_NO_EMPTY);
+    if (!is_array($characters)) return $length === null ? substr($value, $start) : substr($value, $start, $length);
+    return implode('', array_slice($characters, $start, $length));
+}
+
+function cleanText(string $value): string
+{
+    $value = strip_tags($value);
+    $value = preg_replace('/[\x{0000}-\x{0008}\x{000B}\x{000C}\x{000E}-\x{001F}\x{007F}]/u', '', $value) ?? $value;
+    return trim(preg_replace('/\s+/u', ' ', $value) ?? $value);
+}
+
+function limitAtWord(string $value, int $limit): string
+{
+    $value = cleanText($value);
+    if (textLength($value) <= $limit) return $value;
+    $candidate = textSlice($value, 0, $limit + 1);
+    $candidate = preg_replace('/\s+\S*$/u', '', $candidate) ?? $candidate;
+    if ($candidate === '') $candidate = textSlice($value, 0, $limit);
+    return preg_replace('/[\s\-–—,.;:!?]+$/u', '', $candidate) ?? $candidate;
+}
+
+function splitTitle(string $value, int $limit = 128): array
+{
+    $original = cleanText($value);
+    $title = limitAtWord($original, $limit);
+    $overflow = textLength($original) > textLength($title)
+        ? (preg_replace('/^[\s\-–—,.;:!?]+/u', '', textSlice($original, textLength($title))) ?? '')
+        : '';
+    return [$title, $overflow, $original];
+}
+
+function friendlyUrl(string $value, int $limit = 128): string
+{
+    $greek = [
+        'α'=>'a','ά'=>'a','β'=>'v','γ'=>'g','δ'=>'d','ε'=>'e','έ'=>'e','ζ'=>'z','η'=>'i','ή'=>'i',
+        'θ'=>'th','ι'=>'i','ί'=>'i','ϊ'=>'i','ΐ'=>'i','κ'=>'k','λ'=>'l','μ'=>'m','ν'=>'n','ξ'=>'x',
+        'ο'=>'o','ό'=>'o','π'=>'p','ρ'=>'r','σ'=>'s','ς'=>'s','τ'=>'t','υ'=>'y','ύ'=>'y','ϋ'=>'y','ΰ'=>'y',
+        'φ'=>'f','χ'=>'ch','ψ'=>'ps','ω'=>'o','ώ'=>'o',
+    ];
+    $value = cleanText(html_entity_decode($value, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+    $value = str_replace(
+        ['Α','Ά','Β','Γ','Δ','Ε','Έ','Ζ','Η','Ή','Θ','Ι','Ί','Ϊ','Κ','Λ','Μ','Ν','Ξ','Ο','Ό','Π','Ρ','Σ','Τ','Υ','Ύ','Ϋ','Φ','Χ','Ψ','Ω','Ώ'],
+        ['α','ά','β','γ','δ','ε','έ','ζ','η','ή','θ','ι','ί','ϊ','κ','λ','μ','ν','ξ','ο','ό','π','ρ','σ','τ','υ','ύ','ϋ','φ','χ','ψ','ω','ώ'],
+        $value
+    );
+    $value = strtr(lowerText($value), $greek);
+    if (function_exists('iconv')) {
+        $ascii = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $value);
+        if ($ascii !== false) $value = $ascii;
+    }
+    $value = preg_replace('/[^a-z0-9]+/i', '-', $value) ?? '';
+    $value = trim(preg_replace('/-+/', '-', $value) ?? $value, '-');
+    $value = textSlice($value, 0, $limit);
+    return rtrim($value, '-');
+}
+
+function cleanEan(string $reference): string
+{
+    return textSlice(preg_replace('/\D+/', '', $reference) ?? '', 0, 13);
+}
+
+function cleanImages(string $value): string
+{
+    if (trim($value) === '') return 'https://sdvigpress.org/images/publi/_default.jpg';
+    $images = array_filter(array_map(fn($url) => textSlice(trim($url), 0, 2048), explode(',', $value)));
+    return implode(',', $images);
 }
 
 function containsText(string $haystack, string $needle): bool
@@ -206,6 +283,27 @@ function productTypeConfig(string $productType): array
     return PRODUCT_TYPES[$productType];
 }
 
+function prestashopConfig(string $version): array
+{
+    if (!isset(PRESTASHOP_VERSIONS[$version])) throw new RuntimeException('Επιλέξτε έγκυρη έκδοση PrestaShop.');
+    return PRESTASHOP_VERSIONS[$version];
+}
+
+function prestashopHeaders(string $version): array
+{
+    static $cache = [];
+    if (isset($cache[$version])) return $cache[$version];
+    $config = prestashopConfig($version);
+    $path = __DIR__.DIRECTORY_SEPARATOR.$config['template'];
+    $handle = fopen($path, 'rb');
+    if ($handle === false) throw new RuntimeException('Δεν βρέθηκε το πρότυπο CSV για PrestaShop '.$version.'.');
+    $headers = fgetcsv($handle, 0, ';', '"', '\\');
+    fclose($handle);
+    if (!is_array($headers) || $headers === []) throw new RuntimeException('Το πρότυπο CSV για PrestaShop '.$version.' δεν έχει έγκυρη κεφαλίδα.');
+    $headers[0] = preg_replace('/^\xEF\xBB\xBF/', '', (string) $headers[0]);
+    return $cache[$version] = $headers;
+}
+
 function normalizeInputRow(array $row, array $indexes): array
 {
     $normalized = array_fill(0, count(INPUT_COLUMNS), '');
@@ -248,6 +346,17 @@ function analyzeCsv(string $path, string $productType): array
                 'reason' => "Η τιμή '{$row[7]}' θα κανονικοποιηθεί.", 'suggestion' => "Μετατροπή σε {$price['fixed']} (τελεία και 2 δεκαδικά)."];
             $row[7] = $price['fixed'];
         }
+        if (textLength(cleanText($row[3])) > 128) {
+            [$shortTitle, $overflow] = splitTitle($row[3]);
+            $issues[] = ['type' => 'fix', 'line' => $line, 'cell' => 'Τίτλος',
+                'reason' => 'Ο τίτλος ξεπερνά το κοινό όριο των 128 χαρακτήρων.',
+                'suggestion' => "Ο τίτλος θα γίνει '$shortTitle' και το υπόλοιπο '$overflow' θα μεταφερθεί στη σύντομη περιγραφή."];
+        }
+        if (textLength(cleanText($row[6])) > 64) {
+            $issues[] = ['type' => 'fix', 'line' => $line, 'cell' => 'Reference',
+                'reason' => 'Το reference ξεπερνά τους 64 χαρακτήρες.',
+                'suggestion' => 'Θα περικοπεί σε όριο λέξης ώστε να είναι αποδεκτό από όλες τις εκδόσεις.'];
+        }
         foreach ([0 => 'A (Εκδότης)', 3 => 'D (Τίτλος)', 6 => 'G (ISBN)'] as $index => $cell) {
             if ($row[$index] === '') $issues[] = ['type' => 'error', 'line' => $line, 'cell' => $cell,
                 'reason' => 'Υποχρεωτικό πεδίο χωρίς τιμή.', 'suggestion' => 'Συμπληρώστε το κελί στο αρχικό CSV.'];
@@ -267,28 +376,33 @@ function analyzeCsv(string $path, string $productType): array
     return compact('rows', 'issues', 'encoding', 'delimiter', 'headerSkipped');
 }
 
-function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, string $productType): array
+function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, string $productType, string $prestashopVersion): array
 {
     [$publisher, $language] = matchPublisher($p[0]);
     if ($productType !== 'foreign_books') { $publisher = trim($p[0]); $language = 'unassigned'; }
+    $publisher = limitAtWord($publisher, 64);
     $price = parsePrice($p[7]);
     if ($price['value'] === null) throw new RuntimeException('Μη έγκυρη τιμή κατά τη δημιουργία.');
     $gross = (float) $price['value'];
-    $title = trim($p[3]); $isbn = trim($p[6]); $series = str_replace('+', 'plus', trim($p[2]));
-    $metaTitle = trim("$title $publisher $isbn");
-    if (textLength($metaTitle) > 67) $metaTitle = textSlice($metaTitle, 0, 67);
+    [$title, $titleOverflow, $originalTitle] = splitTitle($p[3]);
+    $reference = limitAtWord($p[6], 64);
+    $ean = cleanEan($p[6]);
+    $series = limitAtWord(str_replace('+', 'plus', $p[2]), 32);
+    $metaTitle = limitAtWord(trim("$originalTitle $publisher $reference"), 67);
     $metaDescription = $productType === 'clothes'
-        ? trim("$title $publisher")
-        : "Το βιβλίο $title των εκδόσεων $publisher";
+        ? trim("$originalTitle $publisher")
+        : "Το βιβλίο $originalTitle των εκδόσεων $publisher";
     if (trim($p[5]) !== '') $metaDescription .= ' συγγραφέας '.explode(',', $p[5])[0];
-    if (textLength($metaDescription) > 160) $metaDescription = textSlice($metaDescription, 0, 160);
-    $slug = preg_replace('/[^\p{L}\p{N}-]+/u', '', str_replace([' ', '+'], '-', $title));
-    $slug = trim((string) preg_replace('/-+/', '-', (string) $slug), '-');
-    if (textLength($slug) > 150) $slug = textSlice($slug, 0, 150);
-    $image = trim($p[9]) === '' ? 'https://sdvigpress.org/images/publi/_default.jpg' : trim($p[9]);
-    $description = '<h2 class="book-title"><strong>'.htmlspecialchars($title, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'</strong></h2><br />'
+    $metaDescription = limitAtWord($metaDescription, 160);
+    $slug = friendlyUrl($originalTitle);
+    if ($slug === '') $slug = 'product-'.$id;
+    $image = cleanImages($p[9]);
+    $summary = $publisher;
+    if ($titleOverflow !== '') $summary = trim($summary.' - '.$titleOverflow);
+    $summary = limitAtWord($summary, 400);
+    $description = '<h2 class="book-title"><strong>'.htmlspecialchars($originalTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'</strong></h2><br />'
         .'<strong>Εκδότης:</strong> '.htmlspecialchars($publisher, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />'
-        .'<strong>ISBN:</strong> '.htmlspecialchars($isbn, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
+        .'<strong>ISBN:</strong> '.htmlspecialchars($reference, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
     if ($productType === 'foreign_books') {
         $description .= '<strong>Τάξη:</strong> '.htmlspecialchars($p[1], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />'
             .'<strong>Σειρά:</strong> '.htmlspecialchars($p[2], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
@@ -296,21 +410,30 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
     if ($productType === 'greek_books') {
         $description .= '<strong>Συγγραφέας:</strong> '.htmlspecialchars($p[5], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
     }
+    if ($productType !== 'clothes') $description .= '<strong>Διαθεσιμότητα:</strong> Διαθέσιμο<br />';
     $description .= '<br /><em>Περιγραφή</em><br />'.$p[8];
 
-    $row = array_fill(0, count(OUTPUT_HEADERS), '');
+    $config = prestashopConfig($prestashopVersion);
+    $row = array_fill(0, count(prestashopHeaders($prestashopVersion)), '');
     $values = [
-        0 => (string) $id, 1 => '1', 2 => $title, 3 => categoryId($p[1], $language),
-        4 => number_format($gross / $tax, 2, '.', ''), 5 => '14',
-        6 => number_format($gross * (1 - $wholesaleDiscount), 2, '.', ''), 7 => '0', 9 => '20',
-        12 => $isbn, 15 => $publisher, 23 => '520', 26 => '30', 34 => $publisher,
-        35 => $description, 36 => trim($publisher.','.$series, ','), 37 => $metaTitle,
-        38 => trim($publisher.','.$p[2], ','), 39 => $metaDescription, 40 => $slug,
-        41 => 'Αποστολή σε 1-3 εργάσιμες ημέρες', 43 => $p[7] === '' ? '0' : '1',
-        44 => date('Y-m-d'), 45 => date('Y-m-d'), 46 => '1', 47 => $image,
-        50 => 'Έτος έκδοσης:'.$p[4], 52 => 'new'
+        'id' => (string) $id, 'active' => '1', 'title' => $title,
+        'category' => categoryId($p[1], $language),
+        'price' => number_format($gross / $tax, 2, '.', ''), 'tax' => '14',
+        'wholesale' => number_format($gross * (1 - $wholesaleDiscount), 2, '.', ''),
+        'onsale' => '0', 'discount' => '20', 'reference' => $reference,
+        'publisher' => $publisher, 'ean' => $ean,
+        'weight' => '520', 'quantity' => '30', 'summary' => $summary,
+        'description' => $description, 'tags' => trim(limitAtWord($publisher, 32).','.$series, ','),
+        'meta_title' => $metaTitle, 'meta_keywords' => limitAtWord(trim($publisher.','.$series, ','), 255),
+        'meta_description' => $metaDescription, 'slug' => $slug,
+        'in_stock' => 'Αποστολή σε 1-3 εργάσιμες ημέρες',
+        'available' => $p[7] === '' ? '0' : '1', 'available_date' => date('Y-m-d'),
+        'creation_date' => date('Y-m-d'), 'show_price' => '1', 'images' => $image,
+        'feature' => limitAtWord('Έτος έκδοσης:'.cleanText($p[4]), 255), 'condition' => 'new',
     ];
-    foreach ($values as $index => $value) $row[$index] = $value;
+    foreach ($values as $field => $value) {
+        if (isset($config['fields'][$field])) $row[$config['fields'][$field]] = $value;
+    }
     return $row;
 }
 
@@ -334,18 +457,18 @@ function tokenPath(string $token): string
     return $path;
 }
 
-function generateDownload(string $token, int $startId, float $tax, float $discount, string $productType): never
+function generateDownload(string $token, int $startId, float $tax, float $discount, string $productType, string $prestashopVersion): never
 {
     $analysis = analyzeCsv(tokenPath($token), $productType);
     $errors = array_filter($analysis['issues'], fn($i) => $i['type'] === 'error');
     if ($errors !== []) throw new RuntimeException('Υπάρχουν σφάλματα που δεν διορθώνονται με ασφάλεια. Διορθώστε τα στο αρχικό CSV.');
     $output = fopen('php://temp', 'w+b');
     fwrite($output, "\xEF\xBB\xBF");
-    fputcsv($output, OUTPUT_HEADERS, ';', '"', '\\');
+    fputcsv($output, prestashopHeaders($prestashopVersion), ';', '"', '\\');
     $id = $startId + 1;
-    foreach ($analysis['rows'] as $record) fputcsv($output, outputRow($record['data'], $id++, $tax, $discount, $productType), ';', '"', '\\');
+    foreach ($analysis['rows'] as $record) fputcsv($output, outputRow($record['data'], $id++, $tax, $discount, $productType, $prestashopVersion), ';', '"', '\\');
     rewind($output);
-    $name = 'prestashop_'.date('Ymd_His').'.csv';
+    $name = 'prestashop_'.str_replace('.', '', $prestashopVersion).'_'.date('Ymd_His').'.csv';
     header('Content-Type: text/csv; charset=UTF-8');
     header('Content-Disposition: attachment; filename="'.$name.'"');
     header('X-Content-Type-Options: nosniff');
@@ -354,12 +477,14 @@ function generateDownload(string $token, int $startId, float $tax, float $discou
     exit;
 }
 
-$error = null; $analysis = null; $token = ''; $startId = 0; $tax = 1.06; $discount = 0.30; $productType = 'foreign_books';
+$error = null; $analysis = null; $token = ''; $startId = 0; $tax = 1.06; $discount = 0.30; $productType = 'foreign_books'; $prestashopVersion = '9';
 try {
     $action = $_POST['action'] ?? '';
     if ($action === 'analyze') {
         $productType = (string) ($_POST['product_type'] ?? '');
         productTypeConfig($productType);
+        $prestashopVersion = (string) ($_POST['prestashop_version'] ?? '');
+        prestashopHeaders($prestashopVersion);
         $startId = filter_var($_POST['start_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
         if ($startId === false) throw new RuntimeException('Το αρχικό ID πρέπει να είναι ακέραιος αριθμός από 0 και πάνω.');
         $tax = (float) ($_POST['tax'] ?? 1.06); $discount = (float) ($_POST['discount'] ?? 30) / 100;
@@ -369,9 +494,11 @@ try {
     } elseif ($action === 'download') {
         $productType = (string) ($_POST['product_type'] ?? '');
         productTypeConfig($productType);
+        $prestashopVersion = (string) ($_POST['prestashop_version'] ?? '');
+        prestashopHeaders($prestashopVersion);
         $token = (string) ($_POST['token'] ?? ''); $startId = max(0, (int) ($_POST['start_id'] ?? 0));
         $tax = (float) ($_POST['tax'] ?? 1.06); $discount = (float) ($_POST['discount'] ?? .30);
-        generateDownload($token, $startId, $tax, $discount, $productType);
+        generateDownload($token, $startId, $tax, $discount, $productType, $prestashopVersion);
     }
 } catch (Throwable $e) { $error = $e->getMessage(); }
 
@@ -398,6 +525,7 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 <input type="hidden" name="action" value="analyze">
 <div class="grid">
 <label>Είδος προϊόντων<select name="product_type" id="product-type" required><?php foreach (PRODUCT_TYPES as $key => $config): ?><option value="<?= $key ?>"><?= htmlspecialchars($config['label']) ?></option><?php endforeach; ?></select><span class="hint">Όλο το αρχείο πρέπει να περιέχει το ίδιο είδος</span></label>
+<label>Έκδοση PrestaShop<select name="prestashop_version" required><?php foreach (PRESTASHOP_VERSIONS as $key => $config): ?><option value="<?= htmlspecialchars($key) ?>"<?= $key === '9' ? ' selected' : '' ?>><?= htmlspecialchars($config['label']) ?></option><?php endforeach; ?></select><span class="hint">Καθορίζει τις στήλες και τη σειρά του εξαγόμενου CSV</span></label>
 <label>Αρχείο CSV<input type="file" name="csv" accept=".csv,text/csv" required><span class="hint">Έως 10 MB</span></label>
 <label>Τελευταίο υπάρχον ID<input type="number" name="start_id" min="0" value="0" required><span class="hint">Το πρώτο νέο προϊόν θα πάρει +1</span></label>
 <label>Συντελεστής ΦΠΑ<input type="number" name="tax" min="0.01" max="5" step="0.01" value="1.06" required><span class="hint">1.06 σημαίνει ΦΠΑ 6%</span></label>
@@ -408,14 +536,14 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 <?php else: ?>
 <section class="card <?= $errorCount ? 'error' : 'ok' ?>">
 <h2><?= $errorCount ? 'Χρειάζονται διορθώσεις' : 'Το αρχείο είναι έτοιμο' ?></h2>
-<div class="stats"><span class="pill"><?= count($analysis['rows']) ?> προϊόντα</span><span class="pill"><?= $errorCount ?> σφάλματα</span><span class="pill">Encoding: <?= htmlspecialchars($analysis['encoding']) ?></span><span class="pill">Delimiter: <code><?= $analysis['delimiter'] === "\t" ? 'TAB' : htmlspecialchars($analysis['delimiter']) ?></code></span></div>
+<div class="stats"><span class="pill"><?= count($analysis['rows']) ?> προϊόντα</span><span class="pill"><?= $errorCount ?> σφάλματα</span><span class="pill"><?= htmlspecialchars(PRESTASHOP_VERSIONS[$prestashopVersion]['label']) ?></span><span class="pill">Encoding: <?= htmlspecialchars($analysis['encoding']) ?></span><span class="pill">Delimiter: <code><?= $analysis['delimiter'] === "\t" ? 'TAB' : htmlspecialchars($analysis['delimiter']) ?></code></span></div>
 <p class="hint">Οι ασφαλείς διορθώσεις (τιμές και ονομασίες εκδοτών) εφαρμόζονται αυτόματα στην έξοδο. Στο τελικό CSV οι δεκαδικοί γράφονται με τελεία και δύο ψηφία, π.χ. <code>12.50</code>.</p>
 </section>
 <?php if ($analysis['issues']): ?><section class="card"><h2>Αναλυτική αναφορά</h2><div class="scroll"><table><thead><tr><th>Τύπος</th><th>Γραμμή</th><th>Κελί</th><th>Ακριβής λόγος</th><th>Πρόταση</th></tr></thead><tbody>
 <?php foreach ($analysis['issues'] as $issue): ?><tr><td class="t-<?= $issue['type'] ?>"><?= ['error'=>'Σφάλμα','fix'=>'Διόρθωση','warning'=>'Προειδοποίηση'][$issue['type']] ?></td><td><?= $issue['line'] ?></td><td><?= htmlspecialchars($issue['cell']) ?></td><td><?= htmlspecialchars($issue['reason']) ?></td><td><?= htmlspecialchars($issue['suggestion']) ?></td></tr><?php endforeach; ?>
 </tbody></table></div></section><?php endif; ?>
 <section class="card">
-<?php if ($errorCount === 0): ?><form method="post"><input type="hidden" name="action" value="download"><input type="hidden" name="token" value="<?= htmlspecialchars($token) ?>"><input type="hidden" name="product_type" value="<?= htmlspecialchars($productType) ?>"><input type="hidden" name="start_id" value="<?= $startId ?>"><input type="hidden" name="tax" value="<?= $tax ?>"><input type="hidden" name="discount" value="<?= $discount ?>"><button class="btn" type="submit">Download PrestaShop CSV</button></form><?php else: ?><p>Διορθώστε τα κόκκινα σφάλματα στο αρχικό αρχείο και ανεβάστε το ξανά. Δεν γίνεται αυθαίρετη αλλαγή όταν η σωστή τιμή δεν είναι βέβαιη.</p><?php endif; ?>
+<?php if ($errorCount === 0): ?><form method="post"><input type="hidden" name="action" value="download"><input type="hidden" name="token" value="<?= htmlspecialchars($token) ?>"><input type="hidden" name="product_type" value="<?= htmlspecialchars($productType) ?>"><input type="hidden" name="prestashop_version" value="<?= htmlspecialchars($prestashopVersion) ?>"><input type="hidden" name="start_id" value="<?= $startId ?>"><input type="hidden" name="tax" value="<?= $tax ?>"><input type="hidden" name="discount" value="<?= $discount ?>"><button class="btn" type="submit">Download <?= htmlspecialchars(PRESTASHOP_VERSIONS[$prestashopVersion]['label']) ?> CSV</button></form><?php else: ?><p>Διορθώστε τα κόκκινα σφάλματα στο αρχικό αρχείο και ανεβάστε το ξανά. Δεν γίνεται αυθαίρετη αλλαγή όταν η σωστή τιμή δεν είναι βέβαιη.</p><?php endif; ?>
 <p><a href="index.php">Έλεγχος άλλου αρχείου</a></p></section>
 <?php endif; ?>
 </main>
