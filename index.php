@@ -163,6 +163,114 @@ function cleanImages(string $value): string
     return implode(',', $images);
 }
 
+function geminiApiKey(): string
+{
+    return trim((string) (getenv('GOOGLE_API_KEY') ?: getenv('GEMINI_API_KEY') ?: ''));
+}
+
+function translateClothingBatch(array $items): array
+{
+    $apiKey = geminiApiKey();
+    if ($apiKey === '') throw new RuntimeException('Δεν έχει οριστεί GOOGLE_API_KEY ή GEMINI_API_KEY στον server.');
+    if (!function_exists('curl_init')) throw new RuntimeException('Η επέκταση PHP cURL απαιτείται για τη μετάφραση μέσω Google AI.');
+    $model = trim((string) (getenv('GEMINI_MODEL') ?: 'gemini-3.8-flash'));
+    if (!preg_match('/^[a-zA-Z0-9._-]+$/', $model)) throw new RuntimeException('Το GEMINI_MODEL δεν είναι έγκυρο.');
+
+    $inputJson = json_encode($items, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    $prompt = "Translate the following clothing product data from Greek to natural ecommerce English. "
+        ."Translate only title and description. Preserve brand names, product codes, HTML tags, URLs, numbers and formatting exactly. "
+        ."Do not add information. Return every id exactly once. Input JSON:\n".$inputJson;
+    $payload = [
+        'contents' => [['role' => 'user', 'parts' => [['text' => $prompt]]]],
+        'generationConfig' => [
+            'temperature' => 0.1,
+            'maxOutputTokens' => 8192,
+            'responseMimeType' => 'application/json',
+            'responseSchema' => [
+                'type' => 'ARRAY',
+                'items' => [
+                    'type' => 'OBJECT',
+                    'properties' => [
+                        'id' => ['type' => 'INTEGER'],
+                        'title' => ['type' => 'STRING'],
+                        'description' => ['type' => 'STRING'],
+                    ],
+                    'required' => ['id', 'title', 'description'],
+                ],
+            ],
+        ],
+    ];
+    $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    $curl = curl_init('https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent');
+    if ($curl === false) throw new RuntimeException('Δεν ήταν δυνατή η αρχικοποίηση σύνδεσης με το Google AI.');
+    curl_setopt_array($curl, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 90,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'x-goog-api-key: '.$apiKey],
+        CURLOPT_POSTFIELDS => $body,
+    ]);
+    $response = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($curl);
+    curl_close($curl);
+    if (!is_string($response)) throw new RuntimeException('Η σύνδεση με το Google AI απέτυχε: '.$curlError);
+    $decoded = json_decode($response, true);
+    if ($status < 200 || $status >= 300) {
+        $message = is_array($decoded) ? (string) ($decoded['error']['message'] ?? 'Άγνωστο σφάλμα API') : 'Άγνωστο σφάλμα API';
+        throw new RuntimeException('Το Google AI επέστρεψε σφάλμα (HTTP '.$status.'): '.$message);
+    }
+    $text = $decoded['candidates'][0]['content']['parts'][0]['text'] ?? null;
+    $translations = is_string($text) ? json_decode($text, true) : null;
+    if (!is_array($translations)) throw new RuntimeException('Το Google AI δεν επέστρεψε έγκυρη δομημένη μετάφραση.');
+    return $translations;
+}
+
+function translateClothingRows(array $records): array
+{
+    if (!isset($_SESSION['clothing_translations']) || !is_array($_SESSION['clothing_translations'])) {
+        $_SESSION['clothing_translations'] = [];
+    }
+    $pending = []; $recordKeys = [];
+    foreach ($records as $index => $record) {
+        $data = $record['data'];
+        $key = hash('sha256', (string) $data[3]."\0".(string) $data[8]);
+        $recordKeys[$index] = $key;
+        if (!isset($_SESSION['clothing_translations'][$key])) {
+            $pending[$key] = ['title' => (string) $data[3], 'description' => (string) $data[8]];
+        }
+    }
+    foreach (array_chunk($pending, 20, true) as $chunk) {
+        $request = []; $ids = [];
+        foreach ($chunk as $key => $texts) {
+            $id = count($request); $ids[$id] = $key;
+            $request[] = ['id' => $id, 'title' => $texts['title'], 'description' => $texts['description']];
+        }
+        $translated = translateClothingBatch($request);
+        $received = [];
+        foreach ($translated as $item) {
+            if (!is_array($item) || !isset($item['id'], $item['title'], $item['description'])) continue;
+            $id = (int) $item['id'];
+            if (!isset($ids[$id])) continue;
+            $_SESSION['clothing_translations'][$ids[$id]] = [
+                'title' => trim((string) $item['title']),
+                'description' => trim((string) $item['description']),
+            ];
+            $received[$id] = true;
+        }
+        if (count($received) !== count($request)) throw new RuntimeException('Δεν μεταφράστηκαν όλα τα προϊόντα από το Google AI.');
+    }
+    foreach ($records as $index => &$record) {
+        $translation = $_SESSION['clothing_translations'][$recordKeys[$index]] ?? null;
+        if (!is_array($translation)) throw new RuntimeException('Λείπει μετάφραση για προϊόν του αρχείου.');
+        $record['data'][3] = $translation['title'];
+        $record['data'][8] = $translation['description'];
+    }
+    unset($record);
+    return $records;
+}
+
 function containsText(string $haystack, string $needle): bool
 {
     if ($needle === '') return false;
@@ -462,7 +570,7 @@ function analyzeInput(string $path, string $productType): array
     return compact('rows', 'issues', 'encoding', 'delimiter', 'headerSkipped');
 }
 
-function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, string $productType, string $prestashopVersion): array
+function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, string $productType, string $prestashopVersion, string $outputLanguage = 'el'): array
 {
     [$publisher, $language] = matchPublisher($p[0]);
     if ($productType !== 'foreign_books') { $publisher = trim($p[0]); $language = 'unassigned'; }
@@ -497,7 +605,8 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
         $description = trim($p[8]);
         if ($composition !== '') {
             if ($description !== '') $description .= '<br /><br />';
-            $description .= '<strong>Σύνθεση:</strong> '.htmlspecialchars($composition, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            $compositionLabel = $outputLanguage === 'en' ? 'Composition' : 'Σύνθεση';
+            $description .= '<strong>'.$compositionLabel.':</strong> '.htmlspecialchars($composition, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         }
     } else {
         $description = '<h2 class="book-title"><strong>'.htmlspecialchars($originalTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'</strong></h2><br />'
@@ -570,18 +679,23 @@ function tokenPath(string $token): string
     return $path;
 }
 
-function generateDownload(string $token, int $startId, float $tax, float $discount, string $productType, string $prestashopVersion): never
+function generateDownload(string $token, int $startId, float $tax, float $discount, string $productType, string $prestashopVersion, string $outputLanguage): never
 {
     $analysis = analyzeInput(tokenPath($token), $productType);
     $errors = array_filter($analysis['issues'], fn($i) => $i['type'] === 'error');
     if ($errors !== []) throw new RuntimeException('Υπάρχουν σφάλματα που δεν διορθώνονται με ασφάλεια. Διορθώστε τα στο αρχικό CSV.');
+    if ($outputLanguage === 'en') {
+        if ($productType !== 'clothes') throw new RuntimeException('Η αγγλική εξαγωγή είναι διαθέσιμη μόνο για ρούχα.');
+        if (function_exists('set_time_limit')) @set_time_limit(300);
+        $analysis['rows'] = translateClothingRows($analysis['rows']);
+    }
     $output = fopen('php://temp', 'w+b');
     fwrite($output, "\xEF\xBB\xBF");
     fputcsv($output, prestashopHeaders($prestashopVersion), ';', '"', '\\');
     $id = $startId + 1;
-    foreach ($analysis['rows'] as $record) fputcsv($output, outputRow($record['data'], $id++, $tax, $discount, $productType, $prestashopVersion), ';', '"', '\\');
+    foreach ($analysis['rows'] as $record) fputcsv($output, outputRow($record['data'], $id++, $tax, $discount, $productType, $prestashopVersion, $outputLanguage), ';', '"', '\\');
     rewind($output);
-    $name = 'prestashop_'.str_replace('.', '', $prestashopVersion).'_'.date('Ymd_His').'.csv';
+    $name = 'prestashop_'.str_replace('.', '', $prestashopVersion).'_'.$outputLanguage.'_'.date('Ymd_His').'.csv';
     header('Content-Type: text/csv; charset=UTF-8');
     header('Content-Disposition: attachment; filename="'.$name.'"');
     header('X-Content-Type-Options: nosniff');
@@ -611,7 +725,9 @@ try {
         prestashopHeaders($prestashopVersion);
         $token = (string) ($_POST['token'] ?? ''); $startId = max(0, (int) ($_POST['start_id'] ?? 0));
         $tax = (float) ($_POST['tax'] ?? 1.06); $discount = (float) ($_POST['discount'] ?? .30);
-        generateDownload($token, $startId, $tax, $discount, $productType, $prestashopVersion);
+        $outputLanguage = (string) ($_POST['output_language'] ?? 'el');
+        if (!in_array($outputLanguage, ['el', 'en'], true)) throw new RuntimeException('Η γλώσσα εξαγωγής δεν είναι έγκυρη.');
+        generateDownload($token, $startId, $tax, $discount, $productType, $prestashopVersion, $outputLanguage);
     }
 } catch (Throwable $e) { $error = $e->getMessage(); }
 
@@ -626,7 +742,7 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CSV / ODS → PrestaShop</title>
 <style>
-:root{font-family:system-ui,sans-serif;color:#172033;background:#f4f6fa}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1100px;margin:36px auto;padding:0 18px}h1{margin-bottom:8px}.lead{color:#536078}.steps{display:flex;gap:10px;margin:24px 0}.step{flex:1;padding:12px;border-radius:10px;background:#e4e9f2}.step.on{background:#2357d8;color:white}.card{background:white;border-radius:14px;padding:22px;box-shadow:0 4px 20px #18223a12;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:15px}label{display:block;font-weight:650}input,select{width:100%;margin-top:6px;padding:10px;border:1px solid #bcc5d4;border-radius:7px;background:white}.version-field{border:0;padding:0;margin:0;min-width:0}.version-field legend{font-weight:650;margin-bottom:6px}.version-options{display:flex;gap:7px;flex-wrap:wrap}.version-option{display:flex;align-items:center;gap:6px;padding:9px 10px;border:1px solid #bcc5d4;border-radius:7px;background:white;cursor:pointer}.version-option input{width:auto;margin:0;padding:0}.hint{font-size:.9rem;color:#647087}.btn{border:0;border-radius:8px;padding:11px 18px;background:#2357d8;color:white;font-weight:700;cursor:pointer}.error{border-left:5px solid #c72e3b;background:#fff0f1}.ok{border-left:5px solid #198754;background:#edf9f2}.stats{display:flex;gap:12px;flex-wrap:wrap}.pill{padding:7px 11px;border-radius:99px;background:#eef1f6}table{width:100%;border-collapse:collapse;font-size:.92rem}th,td{text-align:left;padding:9px;border-bottom:1px solid #e3e7ee;vertical-align:top}.t-error{color:#a51f2b}.t-fix{color:#7a5500}.t-warning{color:#8a4b08}.scroll{overflow:auto;max-height:450px}code{background:#eef1f6;padding:2px 5px;border-radius:4px}
+:root{font-family:system-ui,sans-serif;color:#172033;background:#f4f6fa}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1100px;margin:36px auto;padding:0 18px}h1{margin-bottom:8px}.lead{color:#536078}.steps{display:flex;gap:10px;margin:24px 0}.step{flex:1;padding:12px;border-radius:10px;background:#e4e9f2}.step.on{background:#2357d8;color:white}.card{background:white;border-radius:14px;padding:22px;box-shadow:0 4px 20px #18223a12;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:15px}label{display:block;font-weight:650}input,select{width:100%;margin-top:6px;padding:10px;border:1px solid #bcc5d4;border-radius:7px;background:white}.version-field{border:0;padding:0;margin:0;min-width:0}.version-field legend{font-weight:650;margin-bottom:6px}.version-options{display:flex;gap:7px;flex-wrap:wrap}.version-option{display:flex;align-items:center;gap:6px;padding:9px 10px;border:1px solid #bcc5d4;border-radius:7px;background:white;cursor:pointer}.version-option input{width:auto;margin:0;padding:0}.hint{font-size:.9rem;color:#647087}.btn{border:0;border-radius:8px;padding:11px 18px;background:#2357d8;color:white;font-weight:700;cursor:pointer}.download-actions{display:flex;gap:10px;flex-wrap:wrap}.error{border-left:5px solid #c72e3b;background:#fff0f1}.ok{border-left:5px solid #198754;background:#edf9f2}.stats{display:flex;gap:12px;flex-wrap:wrap}.pill{padding:7px 11px;border-radius:99px;background:#eef1f6}table{width:100%;border-collapse:collapse;font-size:.92rem}th,td{text-align:left;padding:9px;border-bottom:1px solid #e3e7ee;vertical-align:top}.t-error{color:#a51f2b}.t-fix{color:#7a5500}.t-warning{color:#8a4b08}.scroll{overflow:auto;max-height:450px}code{background:#eef1f6;padding:2px 5px;border-radius:4px}
 </style>
 </head><body><main class="wrap">
 <h1>Μετατροπή CSV ή ODS για PrestaShop</h1>
@@ -656,7 +772,9 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 <?php foreach ($analysis['issues'] as $issue): ?><tr><td class="t-<?= $issue['type'] ?>"><?= ['error'=>'Σφάλμα','fix'=>'Διόρθωση','warning'=>'Προειδοποίηση'][$issue['type']] ?></td><td><?= $issue['line'] ?></td><td><?= htmlspecialchars($issue['cell']) ?></td><td><?= htmlspecialchars($issue['reason']) ?></td><td><?= htmlspecialchars($issue['suggestion']) ?></td></tr><?php endforeach; ?>
 </tbody></table></div></section><?php endif; ?>
 <section class="card">
-<?php if ($errorCount === 0): ?><form method="post"><input type="hidden" name="action" value="download"><input type="hidden" name="token" value="<?= htmlspecialchars($token) ?>"><input type="hidden" name="product_type" value="<?= htmlspecialchars($productType) ?>"><input type="hidden" name="prestashop_version" value="<?= htmlspecialchars($prestashopVersion) ?>"><input type="hidden" name="start_id" value="<?= $startId ?>"><input type="hidden" name="tax" value="<?= $tax ?>"><input type="hidden" name="discount" value="<?= $discount ?>"><button class="btn" type="submit">Download <?= htmlspecialchars(PRESTASHOP_VERSIONS[$prestashopVersion]['label']) ?> CSV</button></form><?php else: ?><p>Διορθώστε τα κόκκινα σφάλματα στο αρχικό αρχείο και ανεβάστε το ξανά. Δεν γίνεται αυθαίρετη αλλαγή όταν η σωστή τιμή δεν είναι βέβαιη.</p><?php endif; ?>
+<?php if ($errorCount === 0): ?><div class="download-actions">
+<?php foreach ($productType === 'clothes' ? ['el' => 'Ελληνικά', 'en' => 'Αγγλικά'] : ['el' => 'Ελληνικά'] as $languageCode => $languageLabel): ?><form method="post"><input type="hidden" name="action" value="download"><input type="hidden" name="token" value="<?= htmlspecialchars($token) ?>"><input type="hidden" name="product_type" value="<?= htmlspecialchars($productType) ?>"><input type="hidden" name="prestashop_version" value="<?= htmlspecialchars($prestashopVersion) ?>"><input type="hidden" name="output_language" value="<?= $languageCode ?>"><input type="hidden" name="start_id" value="<?= $startId ?>"><input type="hidden" name="tax" value="<?= $tax ?>"><input type="hidden" name="discount" value="<?= $discount ?>"><button class="btn" type="submit">CSV στα <?= $languageLabel ?></button></form><?php endforeach; ?>
+</div><?php if ($productType === 'clothes'): ?><p class="hint">Η αγγλική εξαγωγή μεταφράζει τίτλο και περιγραφή μέσω Google AI και δημιουργεί ξανά τα αγγλικά SEO πεδία.</p><?php endif; ?><?php else: ?><p>Διορθώστε τα κόκκινα σφάλματα στο αρχικό αρχείο και ανεβάστε το ξανά. Δεν γίνεται αυθαίρετη αλλαγή όταν η σωστή τιμή δεν είναι βέβαιη.</p><?php endif; ?>
 <p><a href="index.php">Έλεγχος άλλου αρχείου</a></p></section>
 <?php endif; ?>
 </main>
