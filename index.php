@@ -616,14 +616,22 @@ function prestashopConfig(string $version): array
     return PRESTASHOP_VERSIONS[$version];
 }
 
+function builtInPrestashopHeaders(string $version): array
+{
+    $headers17 = 'Product ID;Active (0/1);Name *;Categories (x,y,z...);Price tax excluded;Tax rules ID;Wholesale price;On sale (0/1);Discount amount;Discount percent;Discount from (yyyy-mm-dd);Discount to (yyyy-mm-dd);Reference #;Supplier reference #;Supplier;Manufacturer;EAN13;UPC;Ecotax;Width;Height;Depth;Weight;Delivery time of in-stock products;Delivery time of out-of-stock products with allowed orders;Quantity;Minimal quantity;Low stock level;Send me an email when the quantity is under this level;Visibility;Additional shipping cost;Unity;Unit price;Summary;Description;Tags (x,y,z...);Meta title;Meta keywords;Meta description;URL rewritten;Text when in stock;Text when backorder allowed;Available for order (0 = No, 1 = Yes);Product available date;Product creation date;Show price (0 = No, 1 = Yes);Image URLs (x,y,z...);Image alt texts (x,y,z...);Delete existing images (0 = No, 1 = Yes);Feature(Name:Value:Position);Available online only (0 = No, 1 = Yes);Condition;Customizable (0 = No, 1 = Yes);Uploadable files (0 = No, 1 = Yes);Text fields (0 = No, 1 = Yes);Out of stock action;Virtual product;File URL;Number of allowed downloads;Expiration date;Number of days;ID / Name of shop;Advanced stock management;Depends On Stock;Warehouse;Acessories  (x,y,z...)';
+    $headers8 = str_replace('Send me an email when the quantity is under this level', 'Receive a low stock alert by email', $headers17);
+    $headers9 = 'Product ID;Active (0/1);Name *;Categories (x,y,z...);Price tax excluded;Tax rules ID;Wholesale price;On sale (0/1);Discount amount;Discount percent;Discount from (yyyy-mm-dd);Discount to (yyyy-mm-dd);Reference #;Supplier reference #;Supplier;Manufacturer;EAN13;ISBN;UPC;MPN;Ecotax;Width;Height;Depth;Weight;Delivery time of in-stock products;Delivery time of out-of-stock products with allowed orders;Quantity;Minimal quantity;Low stock level;Receive a low stock alert by email;Stock location;Visibility;Additional shipping cost;Unity;Unit price;Summary;Description;Tags (x,y,z...);Meta title;Meta description;URL rewritten;Text when in stock;Text when backorder allowed;Available for order (0 = No, 1 = Yes);Product available date;Product creation date;Show price (0 = No, 1 = Yes);Image URLs (x,y,z...);Image alt texts (x,y,z...);Delete existing images (0 = No, 1 = Yes);Feature(Name:Value:Position);Available online only (0 = No, 1 = Yes);Condition;Customizable (0 = No, 1 = Yes);Uploadable files (0 = No, 1 = Yes);Text fields (0 = No, 1 = Yes);Out of stock action;Virtual product;File URL;Number of allowed downloads;Expiration date;Number of days;ID / Name of shop;Advanced stock management;Depends On Stock;Warehouse;Acessories  (x,y,z...)';
+    return explode(';', $version === '1.7' ? $headers17 : ($version === '8' ? $headers8 : $headers9));
+}
+
 function prestashopHeaders(string $version): array
 {
     static $cache = [];
     if (isset($cache[$version])) return $cache[$version];
     $config = prestashopConfig($version);
     $path = __DIR__.DIRECTORY_SEPARATOR.$config['template'];
-    $handle = fopen($path, 'rb');
-    if ($handle === false) throw new RuntimeException('Δεν βρέθηκε το πρότυπο CSV για PrestaShop '.$version.'.');
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) return $cache[$version] = builtInPrestashopHeaders($version);
     $headers = fgetcsv($handle, 0, ';', '"', '\\');
     fclose($handle);
     if (!is_array($headers) || $headers === []) throw new RuntimeException('Το πρότυπο CSV για PrestaShop '.$version.' δεν έχει έγκυρη κεφαλίδα.');
