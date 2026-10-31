@@ -27,7 +27,7 @@ const PRESTASHOP_VERSIONS = [
     '1.7' => [
         'label' => 'PrestaShop 1.7',
         'template' => 'products_import-presta17.csv',
-        'fields' => ['id'=>0, 'active'=>1, 'title'=>2, 'category'=>3, 'price'=>4, 'tax'=>5, 'wholesale'=>6, 'onsale'=>7, 'discount'=>9, 'reference'=>12, 'publisher'=>15, 'ean'=>16, 'weight'=>22, 'quantity'=>25, 'summary'=>33, 'description'=>34, 'tags'=>35, 'meta_title'=>36, 'meta_keywords'=>37, 'meta_description'=>38, 'slug'=>39, 'in_stock'=>40, 'available'=>42, 'available_date'=>43, 'creation_date'=>44, 'show_price'=>45, 'images'=>46, 'feature'=>49, 'condition'=>51],
+        'fields' => ['id'=>0, 'active'=>1, 'title'=>2, 'category'=>3, 'price'=>4, 'tax'=>5, 'wholesale'=>6, 'onsale'=>7, 'discount'=>9, 'reference'=>12, 'publisher'=>15, 'ean'=>16, 'weight'=>23, 'quantity'=>26, 'summary'=>34, 'description'=>35, 'tags'=>36, 'meta_title'=>37, 'meta_keywords'=>38, 'meta_description'=>39, 'slug'=>40, 'in_stock'=>41, 'available'=>43, 'available_date'=>44, 'creation_date'=>45, 'show_price'=>46, 'images'=>47, 'feature'=>50, 'condition'=>52],
     ],
     '8' => [
         'label' => 'PrestaShop 8',
@@ -618,7 +618,7 @@ function prestashopConfig(string $version): array
 
 function builtInPrestashopHeaders(string $version): array
 {
-    $headers17 = 'Product ID;Active (0/1);Name *;Categories (x,y,z...);Price tax excluded;Tax rules ID;Wholesale price;On sale (0/1);Discount amount;Discount percent;Discount from (yyyy-mm-dd);Discount to (yyyy-mm-dd);Reference #;Supplier reference #;Supplier;Manufacturer;EAN13;UPC;Ecotax;Width;Height;Depth;Weight;Delivery time of in-stock products;Delivery time of out-of-stock products with allowed orders;Quantity;Minimal quantity;Low stock level;Send me an email when the quantity is under this level;Visibility;Additional shipping cost;Unity;Unit price;Summary;Description;Tags (x,y,z...);Meta title;Meta keywords;Meta description;URL rewritten;Text when in stock;Text when backorder allowed;Available for order (0 = No, 1 = Yes);Product available date;Product creation date;Show price (0 = No, 1 = Yes);Image URLs (x,y,z...);Image alt texts (x,y,z...);Delete existing images (0 = No, 1 = Yes);Feature(Name:Value:Position);Available online only (0 = No, 1 = Yes);Condition;Customizable (0 = No, 1 = Yes);Uploadable files (0 = No, 1 = Yes);Text fields (0 = No, 1 = Yes);Out of stock action;Virtual product;File URL;Number of allowed downloads;Expiration date;Number of days;ID / Name of shop;Advanced stock management;Depends On Stock;Warehouse;Acessories  (x,y,z...)';
+    $headers17 = 'Product ID;Active (0/1);Name *;Categories (x,y,z...);Price tax excluded;Tax rules ID;Wholesale price;On sale (0/1);Discount amount;Discount percent;Discount from (yyyy-mm-dd);Discount to (yyyy-mm-dd);Reference #;Supplier reference #;Supplier;Manufacturer;EAN13;UPC;MPN;Ecotax;Width;Height;Depth;Weight;Delivery time of in-stock products;Delivery time of out-of-stock products with allowed orders;Quantity;Minimal quantity;Low stock level;Send me an email when the quantity is under this level;Visibility;Additional shipping cost;Unity;Unit price;Summary;Description;Tags (x,y,z...);Meta title;Meta keywords;Meta description;URL rewritten;Text when in stock;Text when backorder allowed;Available for order (0 = No, 1 = Yes);Product available date;Product creation date;Show price (0 = No, 1 = Yes);Image URLs (x,y,z...);Image alt texts (x,y,z...);Delete existing images (0 = No, 1 = Yes);Feature(Name:Value:Position);Available online only (0 = No, 1 = Yes);Condition;Customizable (0 = No, 1 = Yes);Uploadable files (0 = No, 1 = Yes);Text fields (0 = No, 1 = Yes);Out of stock action;Virtual product;File URL;Number of allowed downloads;Expiration date;Number of days;ID / Name of shop;Advanced stock management;Depends On Stock;Warehouse;Acessories  (x,y,z...)';
     $headers8 = str_replace('Send me an email when the quantity is under this level', 'Receive a low stock alert by email', $headers17);
     $headers9 = 'Product ID;Active (0/1);Name *;Categories (x,y,z...);Price tax excluded;Tax rules ID;Wholesale price;On sale (0/1);Discount amount;Discount percent;Discount from (yyyy-mm-dd);Discount to (yyyy-mm-dd);Reference #;Supplier reference #;Supplier;Manufacturer;EAN13;ISBN;UPC;MPN;Ecotax;Width;Height;Depth;Weight;Delivery time of in-stock products;Delivery time of out-of-stock products with allowed orders;Quantity;Minimal quantity;Low stock level;Receive a low stock alert by email;Stock location;Visibility;Additional shipping cost;Unity;Unit price;Summary;Description;Tags (x,y,z...);Meta title;Meta description;URL rewritten;Text when in stock;Text when backorder allowed;Available for order (0 = No, 1 = Yes);Product available date;Product creation date;Show price (0 = No, 1 = Yes);Image URLs (x,y,z...);Image alt texts (x,y,z...);Delete existing images (0 = No, 1 = Yes);Feature(Name:Value:Position);Available online only (0 = No, 1 = Yes);Condition;Customizable (0 = No, 1 = Yes);Uploadable files (0 = No, 1 = Yes);Text fields (0 = No, 1 = Yes);Out of stock action;Virtual product;File URL;Number of allowed downloads;Expiration date;Number of days;ID / Name of shop;Advanced stock management;Depends On Stock;Warehouse;Acessories  (x,y,z...)';
     return explode(';', $version === '1.7' ? $headers17 : ($version === '8' ? $headers8 : $headers9));
@@ -852,22 +852,26 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
     $values = [
         'id' => (string) $id, 'active' => '1', 'title' => $title,
         'category' => $productType === 'clothes' ? $productCategory : categoryId($p[1], $language),
-        'price' => number_format($gross / $tax, 2, '.', ''), 'tax' => '14',
+        'price' => number_format($gross / $tax, 2, '.', ''),
+        'tax' => $productType === 'clothes' ? '3' : '14',
         'wholesale' => number_format($gross * (1 - $wholesaleDiscount), 2, '.', ''),
-        'onsale' => '0', 'discount' => '20', 'reference' => $reference,
+        'onsale' => '0',
+        'discount' => $productType === 'clothes' ? '' : '20',
+        'reference' => $reference,
         'publisher' => $publisher, 'ean' => $ean,
         'weight' => '520', 'quantity' => '30', 'summary' => $summary,
         'description' => $description,
         'tags' => $productType === 'clothes'
-            ? trim(limitAtWord($publisher, 32).','.limitAtWord($productCategory, 32), ',')
+            ? limitAtWord($publisher, 32)
             : trim(limitAtWord($publisher, 32).','.$series, ','),
         'meta_title' => $metaTitle,
         'meta_keywords' => $productType === 'clothes'
-            ? limitAtWord(trim($publisher.','.$productCategory, ','), 255)
+            ? limitAtWord($publisher, 255)
             : limitAtWord(trim($publisher.','.$series, ','), 255),
         'meta_description' => $metaDescription, 'slug' => $slug,
         'in_stock' => 'Αποστολή σε 1-3 εργάσιμες ημέρες',
-        'available' => $p[7] === '' ? '0' : '1', 'available_date' => date('Y-m-d'),
+        'available' => $productType === 'clothes' ? '1' : ($p[7] === '' ? '0' : '1'),
+        'available_date' => date('Y-m-d'),
         'creation_date' => date('Y-m-d'), 'show_price' => '1', 'images' => $image,
         'feature' => $productType === 'clothes'
             ? limitAtWord('Σύνθεση:'.$composition, 255)
