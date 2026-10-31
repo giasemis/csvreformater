@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 session_start();
 
-const INPUT_COLUMNS = ['Εκδότης', 'Επίπεδο', 'Σειρά', 'Τίτλος', 'Έτος', 'Συγγραφέας', 'ISBN', 'Τιμή', 'Περιγραφή', 'Εικόνα'];
+const INPUT_COLUMNS = ['Εκδότης', 'Επίπεδο', 'Σειρά', 'Τίτλος', 'Έτος', 'Συγγραφέας', 'ISBN', 'Τιμή', 'Περιγραφή', 'Εικόνα', 'Σύνθεση', 'Κατηγορία προϊόντος'];
 
 const PRODUCT_TYPES = [
     'foreign_books' => [
@@ -18,8 +18,8 @@ const PRODUCT_TYPES = [
     ],
     'clothes' => [
         'label' => 'Ρούχα',
-        'columns' => ['Εκδότης', 'Τίτλος', 'Έτος', 'ISBN', 'Τιμή', 'Περιγραφή', 'Εικόνες'],
-        'indexes' => [0, 3, 4, 6, 7, 8, 9],
+        'columns' => ['Κατασκευαστής', 'Τίτλος', 'Κωδικός', 'Σύνθεση', 'Κατηγορία', 'Τιμή', 'Περιγραφή', 'Εικόνες'],
+        'indexes' => [0, 3, 6, 10, 11, 7, 8, 9],
     ],
 ];
 
@@ -204,10 +204,13 @@ function detectDelimiter(string $line): string
     return (string) array_key_first($counts);
 }
 
-function looksLikeHeader(array $row): bool
+function looksLikeHeader(array $row, string $productType): bool
 {
     $joined = lowerText(implode('|', $row));
-    return containsText($joined, 'isbn') && (containsText($joined, 'τιμ') || containsText($joined, 'price'));
+    $hasReference = $productType === 'clothes'
+        ? containsText($joined, 'κωδικ') || containsText($joined, 'reference')
+        : containsText($joined, 'isbn');
+    return $hasReference && (containsText($joined, 'τιμ') || containsText($joined, 'price'));
 }
 
 function parsePrice(string $raw): array
@@ -404,7 +407,7 @@ function analyzeInput(string $path, string $productType): array
         $row = array_map(fn($v) => trim(toUtf8((string) $v, $encoding)), $row);
         if ($firstDataRow && isset($row[0])) $row[0] = preg_replace('/^\xEF\xBB\xBF/', '', $row[0]);
         if (count($row) === 1 && $row[0] === '') continue;
-        if ($firstDataRow && looksLikeHeader($row)) { $headerSkipped = true; $firstDataRow = false; continue; }
+        if ($firstDataRow && looksLikeHeader($row, $productType)) { $headerSkipped = true; $firstDataRow = false; continue; }
         $firstDataRow = false;
 
         $expectedFields = count($typeConfig['columns']);
@@ -424,8 +427,11 @@ function analyzeInput(string $path, string $productType): array
                 'reason' => "Η τιμή '{$row[7]}' θα κανονικοποιηθεί.", 'suggestion' => "Μετατροπή σε {$price['fixed']} (τελεία και 2 δεκαδικά)."];
             $row[7] = $price['fixed'];
         }
-        if (textLength(cleanText($row[3])) > 128) {
-            [$shortTitle, $overflow] = splitTitle($row[3]);
+        $titleToCheck = $productType === 'clothes'
+            ? trim(cleanText($row[0]).' '.cleanText($row[3]).' '.cleanText($row[6]))
+            : $row[3];
+        if (textLength(cleanText($titleToCheck)) > 128) {
+            [$shortTitle, $overflow] = splitTitle($titleToCheck);
             $issues[] = ['type' => 'fix', 'line' => $line, 'cell' => 'Τίτλος',
                 'reason' => 'Ο τίτλος ξεπερνά το κοινό όριο των 128 χαρακτήρων.',
                 'suggestion' => "Ο τίτλος θα γίνει '$shortTitle' και το υπόλοιπο '$overflow' θα μεταφερθεί στη σύντομη περιγραφή."];
@@ -435,7 +441,10 @@ function analyzeInput(string $path, string $productType): array
                 'reason' => 'Το reference ξεπερνά τους 64 χαρακτήρες.',
                 'suggestion' => 'Θα περικοπεί σε όριο λέξης ώστε να είναι αποδεκτό από όλες τις εκδόσεις.'];
         }
-        foreach ([0 => 'A (Εκδότης)', 3 => 'D (Τίτλος)', 6 => 'G (ISBN)'] as $index => $cell) {
+        $requiredFields = $productType === 'clothes'
+            ? [0 => 'Κατασκευαστής', 3 => 'Τίτλος', 6 => 'Κωδικός']
+            : [0 => 'Εκδότης', 3 => 'Τίτλος', 6 => 'ISBN'];
+        foreach ($requiredFields as $index => $cell) {
             if ($row[$index] === '') $issues[] = ['type' => 'error', 'line' => $line, 'cell' => $cell,
                 'reason' => 'Υποχρεωτικό πεδίο χωρίς τιμή.', 'suggestion' => 'Συμπληρώστε το κελί στο αρχικό αρχείο.'];
         }
@@ -461,13 +470,20 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
     $price = parsePrice($p[7]);
     if ($price['value'] === null) throw new RuntimeException('Μη έγκυρη τιμή κατά τη δημιουργία.');
     $gross = (float) $price['value'];
-    [$title, $titleOverflow, $originalTitle] = splitTitle($p[3]);
     $reference = limitAtWord($p[6], 64);
-    $ean = cleanEan($p[6]);
+    $generatedTitle = $productType === 'clothes'
+        ? trim($publisher.' '.cleanText($p[3]).' '.$reference)
+        : $p[3];
+    [$title, $titleOverflow, $originalTitle] = splitTitle($generatedTitle);
+    $ean = $productType === 'clothes' ? '' : cleanEan($p[6]);
     $series = limitAtWord(str_replace('+', 'plus', $p[2]), 32);
-    $metaTitle = limitAtWord(trim("$originalTitle $publisher $reference"), 67);
+    $composition = limitAtWord($p[10], 255);
+    $productCategory = limitAtWord($p[11], 128);
+    $metaTitle = $productType === 'clothes'
+        ? limitAtWord($originalTitle, 67)
+        : limitAtWord(trim("$originalTitle $publisher $reference"), 67);
     $metaDescription = $productType === 'clothes'
-        ? trim("$originalTitle $publisher")
+        ? $originalTitle
         : "Το βιβλίο $originalTitle των εκδόσεων $publisher";
     if (trim($p[5]) !== '') $metaDescription .= ' συγγραφέας '.explode(',', $p[5])[0];
     $metaDescription = limitAtWord($metaDescription, 160);
@@ -477,36 +493,53 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
     $summary = $publisher;
     if ($titleOverflow !== '') $summary = trim($summary.' - '.$titleOverflow);
     $summary = limitAtWord($summary, 400);
-    $description = '<h2 class="book-title"><strong>'.htmlspecialchars($originalTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'</strong></h2><br />'
-        .'<strong>Εκδότης:</strong> '.htmlspecialchars($publisher, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />'
-        .'<strong>ISBN:</strong> '.htmlspecialchars($reference, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
-    if ($productType === 'foreign_books') {
-        $description .= '<strong>Τάξη:</strong> '.htmlspecialchars($p[1], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />'
-            .'<strong>Σειρά:</strong> '.htmlspecialchars($p[2], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
+    if ($productType === 'clothes') {
+        $description = trim($p[8]);
+        if ($composition !== '') {
+            if ($description !== '') $description .= '<br /><br />';
+            $description .= '<strong>Σύνθεση:</strong> '.htmlspecialchars($composition, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        }
+    } else {
+        $description = '<h2 class="book-title"><strong>'.htmlspecialchars($originalTitle, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'</strong></h2><br />'
+            .'<strong>Εκδότης:</strong> '.htmlspecialchars($publisher, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />'
+            .'<strong>ISBN:</strong> '.htmlspecialchars($reference, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
+        if ($productType === 'foreign_books') {
+            $description .= '<strong>Τάξη:</strong> '.htmlspecialchars($p[1], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />'
+                .'<strong>Σειρά:</strong> '.htmlspecialchars($p[2], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
+        }
+        if ($productType === 'greek_books') {
+            $description .= '<strong>Συγγραφέας:</strong> '.htmlspecialchars($p[5], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
+        }
+        $description .= '<strong>Διαθεσιμότητα:</strong> Διαθέσιμο<br />'
+            .'<br /><em>Περιγραφή</em><br />'.$p[8];
     }
-    if ($productType === 'greek_books') {
-        $description .= '<strong>Συγγραφέας:</strong> '.htmlspecialchars($p[5], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'<br />';
-    }
-    if ($productType !== 'clothes') $description .= '<strong>Διαθεσιμότητα:</strong> Διαθέσιμο<br />';
-    $description .= '<br /><em>Περιγραφή</em><br />'.$p[8];
 
     $config = prestashopConfig($prestashopVersion);
     $row = array_fill(0, count(prestashopHeaders($prestashopVersion)), '');
     $values = [
         'id' => (string) $id, 'active' => '1', 'title' => $title,
-        'category' => categoryId($p[1], $language),
+        'category' => $productType === 'clothes' ? $productCategory : categoryId($p[1], $language),
         'price' => number_format($gross / $tax, 2, '.', ''), 'tax' => '14',
         'wholesale' => number_format($gross * (1 - $wholesaleDiscount), 2, '.', ''),
         'onsale' => '0', 'discount' => '20', 'reference' => $reference,
         'publisher' => $publisher, 'ean' => $ean,
         'weight' => '520', 'quantity' => '30', 'summary' => $summary,
-        'description' => $description, 'tags' => trim(limitAtWord($publisher, 32).','.$series, ','),
-        'meta_title' => $metaTitle, 'meta_keywords' => limitAtWord(trim($publisher.','.$series, ','), 255),
+        'description' => $description,
+        'tags' => $productType === 'clothes'
+            ? trim(limitAtWord($publisher, 32).','.limitAtWord($productCategory, 32), ',')
+            : trim(limitAtWord($publisher, 32).','.$series, ','),
+        'meta_title' => $metaTitle,
+        'meta_keywords' => $productType === 'clothes'
+            ? limitAtWord(trim($publisher.','.$productCategory, ','), 255)
+            : limitAtWord(trim($publisher.','.$series, ','), 255),
         'meta_description' => $metaDescription, 'slug' => $slug,
         'in_stock' => 'Αποστολή σε 1-3 εργάσιμες ημέρες',
         'available' => $p[7] === '' ? '0' : '1', 'available_date' => date('Y-m-d'),
         'creation_date' => date('Y-m-d'), 'show_price' => '1', 'images' => $image,
-        'feature' => limitAtWord('Έτος έκδοσης:'.cleanText($p[4]), 255), 'condition' => 'new',
+        'feature' => $productType === 'clothes'
+            ? limitAtWord('Σύνθεση:'.$composition, 255)
+            : limitAtWord('Έτος έκδοσης:'.cleanText($p[4]), 255),
+        'condition' => 'new',
     ];
     foreach ($values as $field => $value) {
         if (isset($config['fields'][$field])) $row[$config['fields'][$field]] = $value;
