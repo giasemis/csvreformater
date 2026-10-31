@@ -156,11 +156,31 @@ function cleanEan(string $reference): string
     return textSlice(preg_replace('/\D+/', '', $reference) ?? '', 0, 13);
 }
 
-function cleanImages(string $value): string
+function clothingJpgUrl(string $url): string
+{
+    $url = preg_replace(
+        '~(/images)/thumbnails/\d+/\d+/detailed/~i',
+        '$1/detailed/',
+        $url
+    ) ?? $url;
+    return preg_replace('~\.webp(?=([?#]|$))~i', '.jpg', $url) ?? $url;
+}
+
+function cleanImages(string $value, string $productType = ''): string
 {
     if (trim($value) === '') return 'https://sdvigpress.org/images/publi/_default.jpg';
-    $images = array_filter(array_map(fn($url) => textSlice(trim($url), 0, 2048), explode(',', $value)));
-    return implode(',', $images);
+    $value = html_entity_decode($value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $parts = preg_split('/\s*[,;\r\n]+\s*|(?<=\S)(?=https?:\/\/)/iu', trim($value)) ?: [];
+    $images = [];
+    foreach ($parts as $part) {
+        $url = trim($part, " \t\n\r\0\x0B\"'");
+        if ($url === '' || !preg_match('~^https?://~i', $url)) continue;
+        if ($productType === 'clothes') $url = clothingJpgUrl($url);
+        $images[] = textSlice($url, 0, 2048);
+    }
+    return $images === []
+        ? 'https://sdvigpress.org/images/publi/_default.jpg'
+        : implode(',', array_values(array_unique($images)));
 }
 
 function geminiApiKey(): string
@@ -802,7 +822,10 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
     $price = parsePrice($p[7]);
     if ($price['value'] === null) throw new RuntimeException('Μη έγκυρη τιμή κατά τη δημιουργία.');
     $gross = (float) $price['value'];
-    $reference = limitAtWord($p[6], 64);
+    $reference = limitAtWord(
+        $productType === 'clothes' ? str_replace('/', '', $p[6]) : $p[6],
+        64
+    );
     $generatedTitle = $productType === 'clothes'
         ? trim($publisher.' '.cleanText($p[3]).' '.$reference)
         : $p[3];
@@ -821,7 +844,7 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
     $metaDescription = limitAtWord($metaDescription, 160);
     $slug = friendlyUrl($originalTitle);
     if ($slug === '') $slug = 'product-'.$id;
-    $image = cleanImages($p[9]);
+    $image = cleanImages($p[9], $productType);
     $summary = $publisher;
     if ($titleOverflow !== '') $summary = trim($summary.' - '.$titleOverflow);
     $summary = limitAtWord($summary, 400);
