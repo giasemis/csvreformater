@@ -311,29 +311,107 @@ function normalizeInputRow(array $row, array $indexes): array
     return $normalized;
 }
 
-function analyzeCsv(string $path, string $productType): array
+function readOdsRows(string $path, int $expectedColumns): array
+{
+    if (!class_exists('ZipArchive')) throw new RuntimeException('Η επέκταση PHP ZipArchive απαιτείται για αρχεία ODS.');
+    if (!class_exists('DOMDocument')) throw new RuntimeException('Η επέκταση PHP DOM απαιτείται για αρχεία ODS.');
+
+    $zip = new ZipArchive();
+    if ($zip->open($path) !== true) throw new RuntimeException('Το αρχείο ODS δεν είναι έγκυρο ή δεν μπορεί να ανοιχτεί.');
+    $stat = $zip->statName('content.xml');
+    if (!is_array($stat) || (int) ($stat['size'] ?? 0) > 50 * 1024 * 1024) {
+        $zip->close();
+        throw new RuntimeException('Το ODS δεν περιέχει έγκυρο content.xml ή είναι υπερβολικά μεγάλο.');
+    }
+    $xml = $zip->getFromName('content.xml');
+    $zip->close();
+    if (!is_string($xml) || $xml === '') throw new RuntimeException('Δεν βρέθηκαν δεδομένα στο αρχείο ODS.');
+
+    $previousErrors = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadXML($xml, LIBXML_NONET | LIBXML_COMPACT);
+    libxml_clear_errors();
+    libxml_use_internal_errors($previousErrors);
+    if (!$loaded) throw new RuntimeException('Το περιεχόμενο του ODS δεν είναι έγκυρο XML.');
+
+    $xpath = new DOMXPath($document);
+    $xpath->registerNamespace('office', 'urn:oasis:names:tc:opendocument:xmlns:office:1.0');
+    $xpath->registerNamespace('table', 'urn:oasis:names:tc:opendocument:xmlns:table:1.0');
+    $xpath->registerNamespace('text', 'urn:oasis:names:tc:opendocument:xmlns:text:1.0');
+    $sheets = $xpath->query('//office:body/office:spreadsheet/table:table');
+    if ($sheets === false || $sheets->length === 0) throw new RuntimeException('Το ODS δεν περιέχει φύλλο εργασίας.');
+    $rowNodes = $xpath->query('.//table:table-row', $sheets->item(0));
+    if ($rowNodes === false) throw new RuntimeException('Δεν ήταν δυνατή η ανάγνωση των γραμμών του ODS.');
+
+    $rows = []; $sheetLine = 0;
+    foreach ($rowNodes as $rowNode) {
+        $repeatRows = max(1, min(10000, (int) $rowNode->getAttributeNS('urn:oasis:names:tc:opendocument:xmlns:table:1.0', 'number-rows-repeated')));
+        $cells = $xpath->query('./table:table-cell | ./table:covered-table-cell', $rowNode);
+        $row = [];
+        if ($cells !== false) foreach ($cells as $cell) {
+            $paragraphs = $xpath->query('.//text:p', $cell);
+            $parts = [];
+            if ($paragraphs !== false) foreach ($paragraphs as $paragraph) $parts[] = $paragraph->textContent;
+            $value = trim(implode("\n", $parts));
+            if ($value === '') {
+                foreach (['string-value', 'value', 'date-value', 'time-value', 'boolean-value'] as $attribute) {
+                    $candidate = $cell->getAttributeNS('urn:oasis:names:tc:opendocument:xmlns:office:1.0', $attribute);
+                    if ($candidate !== '') { $value = $candidate; break; }
+                }
+            }
+            $repeatCells = max(1, (int) $cell->getAttributeNS('urn:oasis:names:tc:opendocument:xmlns:table:1.0', 'number-columns-repeated'));
+            $repeatCells = min($repeatCells, max(0, ($expectedColumns + 1) - count($row)));
+            for ($i = 0; $i < $repeatCells; $i++) $row[] = $value;
+            if (count($row) > $expectedColumns) break;
+        }
+        while (count($row) > $expectedColumns && end($row) === '') array_pop($row);
+        $hasValue = count(array_filter($row, fn($value) => $value !== '')) > 0;
+        if ($hasValue) while (count($row) < $expectedColumns) $row[] = '';
+        for ($i = 0; $i < $repeatRows; $i++) {
+            $sheetLine++;
+            if ($hasValue) $rows[] = ['line' => $sheetLine, 'data' => $row];
+        }
+    }
+    if ($rows === []) throw new RuntimeException('Το πρώτο φύλλο του ODS δεν περιέχει δεδομένα.');
+    return $rows;
+}
+
+function analyzeInput(string $path, string $productType): array
 {
     $typeConfig = productTypeConfig($productType);
-    $sample = (string) file_get_contents($path, false, null, 0, 65536);
-    $encoding = detectEncoding($sample);
-    $firstLine = strtok($sample, "\r\n") ?: '';
-    $delimiter = detectDelimiter(toUtf8($firstLine, $encoding));
-    $handle = fopen($path, 'rb');
-    if ($handle === false) throw new RuntimeException('Δεν ήταν δυνατό να ανοιχτεί το αρχείο.');
+    $extension = lowerText((string) pathinfo($path, PATHINFO_EXTENSION));
+    $inputRows = [];
+    if ($extension === 'ods') {
+        $encoding = 'UTF-8'; $delimiter = 'κελιά ODS';
+        $inputRows = readOdsRows($path, count($typeConfig['columns']));
+    } else {
+        $sample = (string) file_get_contents($path, false, null, 0, 65536);
+        $encoding = detectEncoding($sample);
+        $firstLine = strtok($sample, "\r\n") ?: '';
+        $delimiter = detectDelimiter(toUtf8($firstLine, $encoding));
+        $handle = fopen($path, 'rb');
+        if ($handle === false) throw new RuntimeException('Δεν ήταν δυνατό να ανοιχτεί το αρχείο.');
+        $line = 0;
+        while (($data = fgetcsv($handle, 0, $delimiter, '"', '\\')) !== false) {
+            $inputRows[] = ['line' => ++$line, 'data' => $data];
+        }
+        fclose($handle);
+    }
 
-    $rows = []; $issues = []; $line = 0; $headerSkipped = false;
-    while (($row = fgetcsv($handle, 0, $delimiter, '"', '\\')) !== false) {
-        $line++;
+    $rows = []; $issues = []; $headerSkipped = false; $firstDataRow = true;
+    foreach ($inputRows as $inputRow) {
+        $line = $inputRow['line']; $row = $inputRow['data'];
         $row = array_map(fn($v) => trim(toUtf8((string) $v, $encoding)), $row);
-        if ($line === 1 && isset($row[0])) $row[0] = preg_replace('/^\xEF\xBB\xBF/', '', $row[0]);
+        if ($firstDataRow && isset($row[0])) $row[0] = preg_replace('/^\xEF\xBB\xBF/', '', $row[0]);
         if (count($row) === 1 && $row[0] === '') continue;
-        if ($line === 1 && looksLikeHeader($row)) { $headerSkipped = true; continue; }
+        if ($firstDataRow && looksLikeHeader($row)) { $headerSkipped = true; $firstDataRow = false; continue; }
+        $firstDataRow = false;
 
         $expectedFields = count($typeConfig['columns']);
         if (count($row) !== $expectedFields) {
             $issues[] = ['type' => 'error', 'line' => $line, 'cell' => 'ολόκληρη γραμμή',
                 'reason' => 'Βρέθηκαν '.count($row).' πεδία αντί για '.$expectedFields.'.',
-                'suggestion' => 'Ελέγξτε μήπως υπάρχει ασχολίαστο '.$delimiter.' μέσα σε κείμενο ή λείπει πεδίο.'];
+                'suggestion' => $extension === 'ods' ? 'Ελέγξτε αν λείπει ή περισσεύει κελί στη συγκεκριμένη γραμμή.' : 'Ελέγξτε μήπως υπάρχει ασχολίαστο '.$delimiter.' μέσα σε κείμενο ή λείπει πεδίο.'];
             continue;
         }
         $row = normalizeInputRow($row, $typeConfig['indexes']);
@@ -359,7 +437,7 @@ function analyzeCsv(string $path, string $productType): array
         }
         foreach ([0 => 'A (Εκδότης)', 3 => 'D (Τίτλος)', 6 => 'G (ISBN)'] as $index => $cell) {
             if ($row[$index] === '') $issues[] = ['type' => 'error', 'line' => $line, 'cell' => $cell,
-                'reason' => 'Υποχρεωτικό πεδίο χωρίς τιμή.', 'suggestion' => 'Συμπληρώστε το κελί στο αρχικό CSV.'];
+                'reason' => 'Υποχρεωτικό πεδίο χωρίς τιμή.', 'suggestion' => 'Συμπληρώστε το κελί στο αρχικό αρχείο.'];
         }
         [$publisher, $language] = matchPublisher($row[0]);
         if ($productType === 'foreign_books' && $language === 'unassigned') $issues[] = ['type' => 'warning', 'line' => $line, 'cell' => 'A (Εκδότης)',
@@ -372,7 +450,6 @@ function analyzeCsv(string $path, string $productType): array
 
         $rows[] = ['line' => $line, 'data' => $row];
     }
-    fclose($handle);
     return compact('rows', 'issues', 'encoding', 'delimiter', 'headerSkipped');
 }
 
@@ -439,13 +516,16 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
 
 function saveUpload(): string
 {
-    if (!isset($_FILES['csv']) || !is_array($_FILES['csv'])) throw new RuntimeException('Δεν επιλέχθηκε αρχείο CSV.');
+    if (!isset($_FILES['csv']) || !is_array($_FILES['csv'])) throw new RuntimeException('Δεν επιλέχθηκε αρχείο CSV ή ODS.');
     if ($_FILES['csv']['error'] !== UPLOAD_ERR_OK) throw new RuntimeException('Το upload απέτυχε (κωδικός '.$_FILES['csv']['error'].').');
     if ((int) $_FILES['csv']['size'] > 10 * 1024 * 1024) throw new RuntimeException('Το αρχείο ξεπερνά το όριο των 10 MB.');
+    $originalName = basename((string) $_FILES['csv']['name']);
+    $extension = lowerText((string) pathinfo($originalName, PATHINFO_EXTENSION));
+    if (!in_array($extension, ['csv', 'ods'], true)) throw new RuntimeException('Επιτρέπονται μόνο αρχεία CSV και ODS.');
     $token = bin2hex(random_bytes(16));
-    $target = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'csvreformater_'.$token.'.csv';
+    $target = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'csvreformater_'.$token.'.'.$extension;
     if (!move_uploaded_file($_FILES['csv']['tmp_name'], $target)) throw new RuntimeException('Δεν ήταν δυνατή η προσωρινή αποθήκευση.');
-    $_SESSION['csv_files'][$token] = ['path' => $target, 'name' => basename((string) $_FILES['csv']['name']), 'time' => time()];
+    $_SESSION['csv_files'][$token] = ['path' => $target, 'name' => $originalName, 'time' => time()];
     return $token;
 }
 
@@ -459,7 +539,7 @@ function tokenPath(string $token): string
 
 function generateDownload(string $token, int $startId, float $tax, float $discount, string $productType, string $prestashopVersion): never
 {
-    $analysis = analyzeCsv(tokenPath($token), $productType);
+    $analysis = analyzeInput(tokenPath($token), $productType);
     $errors = array_filter($analysis['issues'], fn($i) => $i['type'] === 'error');
     if ($errors !== []) throw new RuntimeException('Υπάρχουν σφάλματα που δεν διορθώνονται με ασφάλεια. Διορθώστε τα στο αρχικό CSV.');
     $output = fopen('php://temp', 'w+b');
@@ -490,7 +570,7 @@ try {
         $tax = (float) ($_POST['tax'] ?? 1.06); $discount = (float) ($_POST['discount'] ?? 30) / 100;
         if ($tax <= 0 || $tax > 5) throw new RuntimeException('Ο συντελεστής φόρου δεν είναι έγκυρος.');
         if ($discount < 0 || $discount > 1) throw new RuntimeException('Η έκπτωση χονδρικής πρέπει να είναι από 0% έως 100%.');
-        $token = saveUpload(); $analysis = analyzeCsv(tokenPath($token), $productType);
+        $token = saveUpload(); $analysis = analyzeInput(tokenPath($token), $productType);
     } elseif ($action === 'download') {
         $productType = (string) ($_POST['product_type'] ?? '');
         productTypeConfig($productType);
@@ -503,7 +583,7 @@ try {
 } catch (Throwable $e) { $error = $e->getMessage(); }
 
 if ($token !== '' && $analysis === null && $error !== null) {
-    try { $analysis = analyzeCsv(tokenPath($token), $productType); } catch (Throwable $ignored) {}
+    try { $analysis = analyzeInput(tokenPath($token), $productType); } catch (Throwable $ignored) {}
 }
 $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['type'] === 'error')) : 0;
 ?>
@@ -511,13 +591,13 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 <html lang="el">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CSV → PrestaShop</title>
+<title>CSV / ODS → PrestaShop</title>
 <style>
-:root{font-family:system-ui,sans-serif;color:#172033;background:#f4f6fa}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1100px;margin:36px auto;padding:0 18px}h1{margin-bottom:8px}.lead{color:#536078}.steps{display:flex;gap:10px;margin:24px 0}.step{flex:1;padding:12px;border-radius:10px;background:#e4e9f2}.step.on{background:#2357d8;color:white}.card{background:white;border-radius:14px;padding:22px;box-shadow:0 4px 20px #18223a12;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:15px}label{display:block;font-weight:650}input,select{width:100%;margin-top:6px;padding:10px;border:1px solid #bcc5d4;border-radius:7px;background:white}.hint{font-size:.9rem;color:#647087}.btn{border:0;border-radius:8px;padding:11px 18px;background:#2357d8;color:white;font-weight:700;cursor:pointer}.error{border-left:5px solid #c72e3b;background:#fff0f1}.ok{border-left:5px solid #198754;background:#edf9f2}.stats{display:flex;gap:12px;flex-wrap:wrap}.pill{padding:7px 11px;border-radius:99px;background:#eef1f6}table{width:100%;border-collapse:collapse;font-size:.92rem}th,td{text-align:left;padding:9px;border-bottom:1px solid #e3e7ee;vertical-align:top}.t-error{color:#a51f2b}.t-fix{color:#7a5500}.t-warning{color:#8a4b08}.scroll{overflow:auto;max-height:450px}code{background:#eef1f6;padding:2px 5px;border-radius:4px}
+:root{font-family:system-ui,sans-serif;color:#172033;background:#f4f6fa}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1100px;margin:36px auto;padding:0 18px}h1{margin-bottom:8px}.lead{color:#536078}.steps{display:flex;gap:10px;margin:24px 0}.step{flex:1;padding:12px;border-radius:10px;background:#e4e9f2}.step.on{background:#2357d8;color:white}.card{background:white;border-radius:14px;padding:22px;box-shadow:0 4px 20px #18223a12;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:15px}label{display:block;font-weight:650}input,select{width:100%;margin-top:6px;padding:10px;border:1px solid #bcc5d4;border-radius:7px;background:white}.version-field{border:0;padding:0;margin:0;min-width:0}.version-field legend{font-weight:650;margin-bottom:6px}.version-options{display:flex;gap:7px;flex-wrap:wrap}.version-option{display:flex;align-items:center;gap:6px;padding:9px 10px;border:1px solid #bcc5d4;border-radius:7px;background:white;cursor:pointer}.version-option input{width:auto;margin:0;padding:0}.hint{font-size:.9rem;color:#647087}.btn{border:0;border-radius:8px;padding:11px 18px;background:#2357d8;color:white;font-weight:700;cursor:pointer}.error{border-left:5px solid #c72e3b;background:#fff0f1}.ok{border-left:5px solid #198754;background:#edf9f2}.stats{display:flex;gap:12px;flex-wrap:wrap}.pill{padding:7px 11px;border-radius:99px;background:#eef1f6}table{width:100%;border-collapse:collapse;font-size:.92rem}th,td{text-align:left;padding:9px;border-bottom:1px solid #e3e7ee;vertical-align:top}.t-error{color:#a51f2b}.t-fix{color:#7a5500}.t-warning{color:#8a4b08}.scroll{overflow:auto;max-height:450px}code{background:#eef1f6;padding:2px 5px;border-radius:4px}
 </style>
 </head><body><main class="wrap">
-<h1>Μετατροπή CSV για PrestaShop</h1>
-<p class="lead">Έλεγχος δεδομένων, σαφείς διορθώσεις και ασφαλής εξαγωγή UTF-8 CSV.</p>
+<h1>Μετατροπή CSV ή ODS για PrestaShop</h1>
+<p class="lead">Έλεγχος δεδομένων από CSV ή το πρώτο φύλλο ODS και ασφαλής εξαγωγή UTF-8 CSV.</p>
 <div class="steps"><div class="step <?= $analysis ? '' : 'on' ?>">1. Upload & ρυθμίσεις</div><div class="step <?= $analysis ? 'on' : '' ?>">2. Έλεγχος</div><div class="step <?= $analysis && $errorCount === 0 ? 'on' : '' ?>">3. Download</div></div>
 <?php if ($error !== null): ?><div class="card error"><strong>Δεν ολοκληρώθηκε:</strong> <?= htmlspecialchars($error) ?></div><?php endif; ?>
 <?php if ($analysis === null): ?>
@@ -525,8 +605,8 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 <input type="hidden" name="action" value="analyze">
 <div class="grid">
 <label>Είδος προϊόντων<select name="product_type" id="product-type" required><?php foreach (PRODUCT_TYPES as $key => $config): ?><option value="<?= $key ?>"><?= htmlspecialchars($config['label']) ?></option><?php endforeach; ?></select><span class="hint">Όλο το αρχείο πρέπει να περιέχει το ίδιο είδος</span></label>
-<label>Έκδοση PrestaShop<select name="prestashop_version" required><?php foreach (PRESTASHOP_VERSIONS as $key => $config): ?><option value="<?= htmlspecialchars($key) ?>"<?= $key === '9' ? ' selected' : '' ?>><?= htmlspecialchars($config['label']) ?></option><?php endforeach; ?></select><span class="hint">Καθορίζει τις στήλες και τη σειρά του εξαγόμενου CSV</span></label>
-<label>Αρχείο CSV<input type="file" name="csv" accept=".csv,text/csv" required><span class="hint">Έως 10 MB</span></label>
+<fieldset class="version-field"><legend>Έκδοση PrestaShop</legend><div class="version-options"><?php foreach (PRESTASHOP_VERSIONS as $key => $config): $versionKey = (string) $key; ?><label class="version-option"><input type="radio" name="prestashop_version" value="<?= htmlspecialchars($versionKey) ?>"<?= $versionKey === '9' ? ' checked' : '' ?> required><?= htmlspecialchars($config['label']) ?></label><?php endforeach; ?></div><span class="hint">Καθορίζει τις στήλες και τη σειρά του εξαγόμενου CSV</span></fieldset>
+<label>Αρχείο CSV ή ODS<input type="file" name="csv" accept=".csv,.ods,text/csv,application/vnd.oasis.opendocument.spreadsheet" required><span class="hint">Έως 10 MB · Στο ODS διαβάζεται το πρώτο φύλλο</span></label>
 <label>Τελευταίο υπάρχον ID<input type="number" name="start_id" min="0" value="0" required><span class="hint">Το πρώτο νέο προϊόν θα πάρει +1</span></label>
 <label>Συντελεστής ΦΠΑ<input type="number" name="tax" min="0.01" max="5" step="0.01" value="1.06" required><span class="hint">1.06 σημαίνει ΦΠΑ 6%</span></label>
 <label>Έκπτωση χονδρικής %<input type="number" name="discount" min="0" max="100" step="0.01" value="30" required></label>
