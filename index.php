@@ -106,6 +106,25 @@ function cleanText(string $value): string
     return trim(preg_replace('/\s+/u', ' ', $value) ?? $value);
 }
 
+function replaceLineBreaks(string $value, string $replacement): string
+{
+    $replaced = preg_replace('/\R/u', $replacement, $value);
+    return $replaced ?? str_replace(["\r\n", "\r", "\n"], $replacement, $value);
+}
+
+function descriptionToSingleLineHtml(string $value): string
+{
+    return replaceLineBreaks($value, '<br/>');
+}
+
+function csvSingleLineRow(array $row): array
+{
+    return array_map(
+        fn($value) => replaceLineBreaks((string) $value, ' '),
+        $row
+    );
+}
+
 function limitAtWord(string $value, int $limit): string
 {
     $value = cleanText($value);
@@ -166,18 +185,24 @@ function clothingJpgUrl(string $url): string
     return preg_replace('~\.webp(?=([?#]|$))~i', '.jpg', $url) ?? $url;
 }
 
-function cleanImages(string $value, string $productType = ''): string
+function imageUrls(string $value): array
 {
-    if (trim($value) === '') return 'https://sdvigpress.org/images/publi/_default.jpg';
+    if (trim($value) === '') return [];
     $value = html_entity_decode($value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
     $parts = preg_split('/\s*[,;\r\n]+\s*|(?<=\S)(?=https?:\/\/)/iu', trim($value)) ?: [];
     $images = [];
     foreach ($parts as $part) {
         $url = trim($part, " \t\n\r\0\x0B\"'");
         if ($url === '' || !preg_match('~^https?://~i', $url)) continue;
-        if ($productType === 'clothes') $url = clothingJpgUrl($url);
         $images[] = textSlice($url, 0, 2048);
     }
+    return array_values(array_unique($images));
+}
+
+function cleanImages(string $value, string $productType = ''): string
+{
+    $images = imageUrls($value);
+    if ($productType === 'clothes') $images = array_map('clothingJpgUrl', $images);
     return $images === []
         ? 'https://sdvigpress.org/images/publi/_default.jpg'
         : implode(',', array_values(array_unique($images)));
@@ -666,6 +691,25 @@ function normalizeInputRow(array $row, array $indexes): array
     return $normalized;
 }
 
+function odsTextContent(DOMNode $node): string
+{
+    if ($node->nodeType === XML_TEXT_NODE || $node->nodeType === XML_CDATA_SECTION_NODE) {
+        return (string) $node->nodeValue;
+    }
+    if ($node->namespaceURI === 'urn:oasis:names:tc:opendocument:xmlns:text:1.0') {
+        if ($node->localName === 'line-break') return "\n";
+        if ($node->localName === 'tab') return "\t";
+        if ($node->localName === 's' && $node instanceof DOMElement) {
+            $count = (int) $node->getAttributeNS('urn:oasis:names:tc:opendocument:xmlns:text:1.0', 'c');
+            return str_repeat(' ', max(1, min(1000, $count)));
+        }
+    }
+
+    $value = '';
+    foreach ($node->childNodes as $child) $value .= odsTextContent($child);
+    return $value;
+}
+
 function readOdsRows(string $path, int $expectedColumns): array
 {
     if (!class_exists('ZipArchive')) throw new RuntimeException('Η επέκταση PHP ZipArchive απαιτείται για αρχεία ODS.');
@@ -706,7 +750,7 @@ function readOdsRows(string $path, int $expectedColumns): array
         if ($cells !== false) foreach ($cells as $cell) {
             $paragraphs = $xpath->query('.//text:p', $cell);
             $parts = [];
-            if ($paragraphs !== false) foreach ($paragraphs as $paragraph) $parts[] = $paragraph->textContent;
+            if ($paragraphs !== false) foreach ($paragraphs as $paragraph) $parts[] = odsTextContent($paragraph);
             $value = trim(implode("\n", $parts));
             if ($value === '') {
                 foreach (['string-value', 'value', 'date-value', 'time-value', 'boolean-value'] as $attribute) {
@@ -814,7 +858,7 @@ function analyzeInput(string $path, string $productType): array
     return compact('rows', 'issues', 'encoding', 'delimiter', 'headerSkipped');
 }
 
-function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, string $productType, string $prestashopVersion, string $outputLanguage = 'el'): array
+function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, string $productType, string $prestashopVersion, string $outputLanguage = 'el', string $imageMode = 'with_images'): array
 {
     [$publisher, $language] = matchPublisher($p[0]);
     if ($productType !== 'foreign_books') { $publisher = trim($p[0]); $language = 'unassigned'; }
@@ -844,7 +888,9 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
     $metaDescription = limitAtWord($metaDescription, 160);
     $slug = friendlyUrl($originalTitle);
     if ($slug === '') $slug = 'product-'.$id;
-    $image = cleanImages($p[9], $productType);
+    $image = $productType === 'clothes' && $imageMode === 'separate'
+        ? ''
+        : cleanImages($p[9], $productType);
     $summary = $publisher;
     if ($titleOverflow !== '') $summary = trim($summary.' - '.$titleOverflow);
     $summary = limitAtWord($summary, 400);
@@ -869,6 +915,8 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
         $description .= '<strong>Διαθεσιμότητα:</strong> Διαθέσιμο<br />'
             .'<br /><em>Περιγραφή</em><br />'.$p[8];
     }
+
+    $description = descriptionToSingleLineHtml($description);
 
     $config = prestashopConfig($prestashopVersion);
     $row = array_fill(0, count(prestashopHeaders($prestashopVersion)), '');
@@ -904,7 +952,7 @@ function outputRow(array $p, int $id, float $tax, float $wholesaleDiscount, stri
     foreach ($values as $field => $value) {
         if (isset($config['fields'][$field])) $row[$config['fields'][$field]] = $value;
     }
-    return $row;
+    return csvSingleLineRow($row);
 }
 
 function saveUpload(): string
@@ -930,7 +978,51 @@ function tokenPath(string $token): string
     return $path;
 }
 
-function generateDownload(string $token, int $startId, float $tax, float $discount, string $productType, string $prestashopVersion, string $outputLanguage, bool $normalizeTitles): never
+function validateImageMode(string $imageMode, string $productType): string
+{
+    if (!in_array($imageMode, ['with_images', 'separate'], true)) {
+        throw new RuntimeException('Η επιλογή εξαγωγής φωτογραφιών δεν είναι έγκυρη.');
+    }
+    return $productType === 'clothes' ? $imageMode : 'with_images';
+}
+
+function generatePhotoLinksDownload(string $token): never
+{
+    $analysis = analyzeInput(tokenPath($token), 'clothes');
+    $errors = array_filter($analysis['issues'], fn($i) => $i['type'] === 'error');
+    if ($errors !== []) throw new RuntimeException('Υπάρχουν σφάλματα στο αρχείο. Διορθώστε τα πριν δημιουργήσετε το HTML φωτογραφιών.');
+
+    $escape = fn(string $value): string => htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $name = 'photos_'.date('Ymd_His').'.html';
+    header('Content-Type: text/html; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="'.$name.'"');
+    header('X-Content-Type-Options: nosniff');
+    echo "<!doctype html><html lang=\"el\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Links φωτογραφιών</title>";
+    echo '<style>body{font-family:system-ui,sans-serif;margin:24px;color:#172033}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ccd3df;padding:9px;text-align:left;vertical-align:top}th{background:#eef1f6}.links{min-width:760px}.photo-row{display:grid;grid-template-columns:38px 1fr 1fr;gap:10px;padding:6px 0;border-bottom:1px solid #e5e8ee}.photo-row:last-child{border-bottom:0}a{overflow-wrap:anywhere}</style></head><body>';
+    echo '<h1>Φωτογραφίες ρούχων</h1><p>Σε κάθε γραμμή εμφανίζονται πρώτα τα αρχικά links και δίπλα τα πιθανά JPG.</p><table><thead><tr><th>Προϊόν</th><th>Κωδικός</th><th class="links">Links φωτογραφιών</th></tr></thead><tbody>';
+    foreach ($analysis['rows'] as $index => $record) {
+        $data = $record['data'];
+        $title = trim(cleanText($data[0]).' '.cleanText($data[3]));
+        $reference = str_replace('/', '', trim((string) $data[6]));
+        echo '<tr><td>'.($index + 1).'. '.$escape($title).'</td><td>'.$escape($reference).'</td><td>';
+        $images = imageUrls((string) $data[9]);
+        if ($images === []) {
+            echo '<em>Δεν υπάρχουν links.</em>';
+        } else {
+            foreach ($images as $photoIndex => $webpUrl) {
+                $jpgUrl = clothingJpgUrl($webpUrl);
+                echo '<div class="photo-row"><strong>'.($photoIndex + 1).'.</strong>'
+                    .'<a href="'.$escape($webpUrl).'" target="_blank" rel="noopener">'.$escape($webpUrl).'</a>'
+                    .'<a href="'.$escape($jpgUrl).'" target="_blank" rel="noopener">'.$escape($jpgUrl).'</a></div>';
+            }
+        }
+        echo '</td></tr>';
+    }
+    echo '</tbody></table></body></html>';
+    exit;
+}
+
+function generateDownload(string $token, int $startId, float $tax, float $discount, string $productType, string $prestashopVersion, string $outputLanguage, bool $normalizeTitles, string $imageMode): never
 {
     $analysis = analyzeInput(tokenPath($token), $productType);
     $errors = array_filter($analysis['issues'], fn($i) => $i['type'] === 'error');
@@ -948,7 +1040,7 @@ function generateDownload(string $token, int $startId, float $tax, float $discou
     fwrite($output, "\xEF\xBB\xBF");
     fputcsv($output, prestashopHeaders($prestashopVersion), ';', '"', '\\');
     $id = $startId + 1;
-    foreach ($analysis['rows'] as $record) fputcsv($output, outputRow($record['data'], $id++, $tax, $discount, $productType, $prestashopVersion, $outputLanguage), ';', '"', '\\');
+    foreach ($analysis['rows'] as $record) fputcsv($output, outputRow($record['data'], $id++, $tax, $discount, $productType, $prestashopVersion, $outputLanguage, $imageMode), ';', '"', '\\');
     rewind($output);
     $name = 'prestashop_'.str_replace('.', '', $prestashopVersion).'_'.$outputLanguage.'_'.date('Ymd_His').'.csv';
     header('Content-Type: text/csv; charset=UTF-8');
@@ -959,7 +1051,7 @@ function generateDownload(string $token, int $startId, float $tax, float $discou
     exit;
 }
 
-$error = null; $analysis = null; $token = ''; $startId = 0; $tax = 1.06; $discount = 0.30; $productType = 'foreign_books'; $prestashopVersion = '9'; $normalizeTitles = false;
+$error = null; $analysis = null; $token = ''; $startId = 0; $tax = 1.06; $discount = 0.30; $productType = 'foreign_books'; $prestashopVersion = '9'; $normalizeTitles = false; $imageMode = 'with_images';
 try {
     $action = $_POST['action'] ?? '';
     if ($action === 'analyze') {
@@ -968,6 +1060,7 @@ try {
         $prestashopVersion = (string) ($_POST['prestashop_version'] ?? '');
         prestashopHeaders($prestashopVersion);
         $normalizeTitles = isset($_POST['normalize_titles']) && $_POST['normalize_titles'] === '1';
+        $imageMode = validateImageMode((string) ($_POST['image_mode'] ?? 'with_images'), $productType);
         $startId = filter_var($_POST['start_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
         if ($startId === false) throw new RuntimeException('Το αρχικό ID πρέπει να είναι ακέραιος αριθμός από 0 και πάνω.');
         $tax = (float) ($_POST['tax'] ?? 1.06); $discount = (float) ($_POST['discount'] ?? 30) / 100;
@@ -984,7 +1077,13 @@ try {
         $outputLanguage = (string) ($_POST['output_language'] ?? 'el');
         if (!in_array($outputLanguage, ['el', 'en'], true)) throw new RuntimeException('Η γλώσσα εξαγωγής δεν είναι έγκυρη.');
         $normalizeTitles = isset($_POST['normalize_titles']) && $_POST['normalize_titles'] === '1';
-        generateDownload($token, $startId, $tax, $discount, $productType, $prestashopVersion, $outputLanguage, $normalizeTitles);
+        $imageMode = validateImageMode((string) ($_POST['image_mode'] ?? 'with_images'), $productType);
+        generateDownload($token, $startId, $tax, $discount, $productType, $prestashopVersion, $outputLanguage, $normalizeTitles, $imageMode);
+    } elseif ($action === 'photos_html') {
+        $productType = 'clothes';
+        $imageMode = 'separate';
+        $token = (string) ($_POST['token'] ?? '');
+        generatePhotoLinksDownload($token);
     }
 } catch (Throwable $e) { $error = $e->getMessage(); }
 
@@ -999,7 +1098,7 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CSV / ODS → PrestaShop</title>
 <style>
-:root{font-family:system-ui,sans-serif;color:#172033;background:#f4f6fa}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1100px;margin:36px auto;padding:0 18px}h1{margin-bottom:8px}.lead{color:#536078}.steps{display:flex;gap:10px;margin:24px 0}.step{flex:1;padding:12px;border-radius:10px;background:#e4e9f2}.step.on{background:#2357d8;color:white}.card{background:white;border-radius:14px;padding:22px;box-shadow:0 4px 20px #18223a12;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:15px}label{display:block;font-weight:650}input,select{width:100%;margin-top:6px;padding:10px;border:1px solid #bcc5d4;border-radius:7px;background:white}.version-field{border:0;padding:0;margin:0;min-width:0}.version-field legend{font-weight:650;margin-bottom:6px}.version-options{display:flex;gap:7px;flex-wrap:wrap}.version-option{display:flex;align-items:center;gap:6px;padding:9px 10px;border:1px solid #bcc5d4;border-radius:7px;background:white;cursor:pointer}.version-option input,.check-option input{width:auto;margin:0;padding:0}.check-option{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid #bcc5d4;border-radius:7px;background:white}.hint{font-size:.9rem;color:#647087}.btn{border:0;border-radius:8px;padding:11px 18px;background:#2357d8;color:white;font-weight:700;cursor:pointer}.download-actions{display:flex;gap:10px;flex-wrap:wrap}.error{border-left:5px solid #c72e3b;background:#fff0f1}.ok{border-left:5px solid #198754;background:#edf9f2}.stats{display:flex;gap:12px;flex-wrap:wrap}.pill{padding:7px 11px;border-radius:99px;background:#eef1f6}table{width:100%;border-collapse:collapse;font-size:.92rem}th,td{text-align:left;padding:9px;border-bottom:1px solid #e3e7ee;vertical-align:top}.t-error{color:#a51f2b}.t-fix{color:#7a5500}.t-warning{color:#8a4b08}.scroll{overflow:auto;max-height:450px}code{background:#eef1f6;padding:2px 5px;border-radius:4px}
+:root{font-family:system-ui,sans-serif;color:#172033;background:#f4f6fa}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1100px;margin:36px auto;padding:0 18px}h1{margin-bottom:8px}.lead{color:#536078}.steps{display:flex;gap:10px;margin:24px 0}.step{flex:1;padding:12px;border-radius:10px;background:#e4e9f2}.step.on{background:#2357d8;color:white}.card{background:white;border-radius:14px;padding:22px;box-shadow:0 4px 20px #18223a12;margin-bottom:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:15px}label{display:block;font-weight:650}input,select{width:100%;margin-top:6px;padding:10px;border:1px solid #bcc5d4;border-radius:7px;background:white}.version-field{border:0;padding:0;margin:0;min-width:0}.version-field legend{font-weight:650;margin-bottom:6px}.version-options{display:flex;gap:7px;flex-wrap:wrap}.version-option{display:flex;align-items:center;gap:6px;padding:9px 10px;border:1px solid #bcc5d4;border-radius:7px;background:white;cursor:pointer}.version-option input,.check-option input{width:auto;margin:0;padding:0}.check-option{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid #bcc5d4;border-radius:7px;background:white}.hint{font-size:.9rem;color:#647087}.btn{border:0;border-radius:8px;padding:11px 18px;background:#2357d8;color:white;font-weight:700;cursor:pointer}.btn.secondary{background:#4f5d73}.download-actions{display:flex;gap:10px;flex-wrap:wrap}.error{border-left:5px solid #c72e3b;background:#fff0f1}.ok{border-left:5px solid #198754;background:#edf9f2}.stats{display:flex;gap:12px;flex-wrap:wrap}.pill{padding:7px 11px;border-radius:99px;background:#eef1f6}table{width:100%;border-collapse:collapse;font-size:.92rem}th,td{text-align:left;padding:9px;border-bottom:1px solid #e3e7ee;vertical-align:top}.t-error{color:#a51f2b}.t-fix{color:#7a5500}.t-warning{color:#8a4b08}.scroll{overflow:auto;max-height:450px}code{background:#eef1f6;padding:2px 5px;border-radius:4px}
 </style>
 </head><body><main class="wrap">
 <h1>Μετατροπή CSV ή ODS για PrestaShop</h1>
@@ -1012,7 +1111,7 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 <div class="grid">
 <label>Είδος προϊόντων<select name="product_type" id="product-type" required><?php foreach (PRODUCT_TYPES as $key => $config): ?><option value="<?= $key ?>"><?= htmlspecialchars($config['label']) ?></option><?php endforeach; ?></select><span class="hint">Όλο το αρχείο πρέπει να περιέχει το ίδιο είδος</span></label>
 <fieldset class="version-field"><legend>Έκδοση PrestaShop</legend><div class="version-options"><?php foreach (PRESTASHOP_VERSIONS as $key => $config): $versionKey = (string) $key; ?><label class="version-option"><input type="radio" name="prestashop_version" value="<?= htmlspecialchars($versionKey) ?>"<?= $versionKey === '9' ? ' checked' : '' ?> required><?= htmlspecialchars($config['label']) ?></label><?php endforeach; ?></div><span class="hint">Καθορίζει τις στήλες και τη σειρά του εξαγόμενου CSV</span></fieldset>
-<div id="clothing-options" hidden><label class="check-option"><input type="checkbox" name="normalize_titles" value="1"> Διόρθωση κεφαλαίων τίτλων με AI</label><span class="hint">Μετατρέπει μόνο τους τίτλους που είναι κυρίως κεφαλαίοι σε φυσικά ελληνικά με τόνους.</span></div>
+<div id="clothing-options" hidden><label class="check-option"><input type="checkbox" name="normalize_titles" value="1"> Διόρθωση κεφαλαίων τίτλων με AI</label><span class="hint">Μετατρέπει μόνο τους τίτλους που είναι κυρίως κεφαλαίοι σε φυσικά ελληνικά με τόνους.</span><fieldset class="version-field" style="margin-top:12px"><legend>Φωτογραφίες ρούχων</legend><div class="version-options"><label class="version-option"><input type="radio" name="image_mode" value="with_images" checked> Με φώτος</label><label class="version-option"><input type="radio" name="image_mode" value="separate"> Φώτος χωριστά</label></div><span class="hint">Στη δεύτερη επιλογή το CSV έχει κενό πεδίο εικόνων και δημιουργείται ξεχωριστό HTML με τα links.</span></fieldset></div>
 <label>Αρχείο CSV ή ODS<input type="file" name="csv" accept=".csv,.ods,text/csv,application/vnd.oasis.opendocument.spreadsheet" required><span class="hint">Έως 10 MB · Στο ODS διαβάζεται το πρώτο φύλλο</span></label>
 <label>Τελευταίο υπάρχον ID<input type="number" name="start_id" min="0" value="0" required><span class="hint">Το πρώτο νέο προϊόν θα πάρει +1</span></label>
 <label>Συντελεστής ΦΠΑ<input type="number" name="tax" min="0.01" max="5" step="0.01" value="1.06" required><span class="hint">1.06 σημαίνει ΦΠΑ 6%</span></label>
@@ -1031,7 +1130,7 @@ $errorCount = $analysis ? count(array_filter($analysis['issues'], fn($i) => $i['
 </tbody></table></div></section><?php endif; ?>
 <section class="card">
 <?php if ($errorCount === 0): ?><div class="download-actions">
-<?php foreach ($productType === 'clothes' ? ['el' => 'Ελληνικά', 'en' => 'Αγγλικά'] : ['el' => 'Ελληνικά'] as $languageCode => $languageLabel): ?><form method="post"><input type="hidden" name="action" value="download"><input type="hidden" name="token" value="<?= htmlspecialchars($token) ?>"><input type="hidden" name="product_type" value="<?= htmlspecialchars($productType) ?>"><input type="hidden" name="prestashop_version" value="<?= htmlspecialchars($prestashopVersion) ?>"><input type="hidden" name="output_language" value="<?= $languageCode ?>"><?php if ($normalizeTitles): ?><input type="hidden" name="normalize_titles" value="1"><?php endif; ?><input type="hidden" name="start_id" value="<?= $startId ?>"><input type="hidden" name="tax" value="<?= $tax ?>"><input type="hidden" name="discount" value="<?= $discount ?>"><button class="btn" type="submit">CSV στα <?= $languageLabel ?></button></form><?php endforeach; ?>
+<?php foreach ($productType === 'clothes' ? ['el' => 'Ελληνικά', 'en' => 'Αγγλικά'] : ['el' => 'Ελληνικά'] as $languageCode => $languageLabel): ?><form method="post"><input type="hidden" name="action" value="download"><input type="hidden" name="token" value="<?= htmlspecialchars($token) ?>"><input type="hidden" name="product_type" value="<?= htmlspecialchars($productType) ?>"><input type="hidden" name="prestashop_version" value="<?= htmlspecialchars($prestashopVersion) ?>"><input type="hidden" name="output_language" value="<?= $languageCode ?>"><input type="hidden" name="image_mode" value="<?= htmlspecialchars($imageMode) ?>"><?php if ($normalizeTitles): ?><input type="hidden" name="normalize_titles" value="1"><?php endif; ?><input type="hidden" name="start_id" value="<?= $startId ?>"><input type="hidden" name="tax" value="<?= $tax ?>"><input type="hidden" name="discount" value="<?= $discount ?>"><button class="btn" type="submit">CSV στα <?= $languageLabel ?></button></form><?php endforeach; ?><?php if ($productType === 'clothes' && $imageMode === 'separate'): ?><form method="post"><input type="hidden" name="action" value="photos_html"><input type="hidden" name="token" value="<?= htmlspecialchars($token) ?>"><button class="btn secondary" type="submit">HTML φωτογραφιών</button></form><?php endif; ?>
 </div><?php if ($productType === 'clothes'): ?><p class="hint">Στο ελληνικό CSV μεταφράζεται η σύνθεση από αγγλικά σε ελληνικά. Στο αγγλικό CSV η σύνθεση μένει όπως είναι και μεταφράζονται ο τίτλος και η περιγραφή μαζί με τα παράγωγα SEO πεδία.</p><?php endif; ?><?php else: ?><p>Διορθώστε τα κόκκινα σφάλματα στο αρχικό αρχείο και ανεβάστε το ξανά. Δεν γίνεται αυθαίρετη αλλαγή όταν η σωστή τιμή δεν είναι βέβαιη.</p><?php endif; ?>
 <p><a href="index.php">Έλεγχος άλλου αρχείου</a></p></section>
 <?php endif; ?>
