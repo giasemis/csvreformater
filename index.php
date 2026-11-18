@@ -803,6 +803,8 @@ function analyzeInput(string $path, string $productType): array
         $row = array_map(fn($v) => trim(toUtf8((string) $v, $encoding)), $row);
         if ($firstDataRow && isset($row[0])) $row[0] = preg_replace('/^\xEF\xBB\xBF/', '', $row[0]);
         if (count($row) === 1 && $row[0] === '') continue;
+        $nonEmptyCells = array_filter($row, fn($value) => $value !== '');
+        if ($firstDataRow && count($nonEmptyCells) === 1 && array_key_first($nonEmptyCells) === 0) continue;
         if ($firstDataRow && looksLikeHeader($row, $productType)) { $headerSkipped = true; $firstDataRow = false; continue; }
         $firstDataRow = false;
 
